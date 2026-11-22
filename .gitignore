@@ -1,0 +1,27 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual Environments
+mundus_env/
+.venv/
+env/
+venv/
+
+# Large Model Weights (Upload to Hugging Face Hub, not GitHub git commits)
+checkpoints/*.pt
+*.pt
+*.bin
+*.onnx
+
+# Logs & temp test outputs
+*.log
+test.gif
+test_rollout.gif
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/
