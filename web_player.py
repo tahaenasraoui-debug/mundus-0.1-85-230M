@@ -21,6 +21,7 @@ from config import get_config_85m, get_config_130m, get_config_230m, TokenizerCo
 from tokenizer import VQVAE
 from world_model import WorldModel
 from dataset import PhysicsGameEnv
+from doom_env import DoomMiniEnv
 
 
 def get_safe_device(requested: str = "auto") -> str:
@@ -39,7 +40,7 @@ def get_safe_device(requested: str = "auto") -> str:
 
 
 class NeuralEngineState:
-    def __init__(self, checkpoint_path=None, model_type="auto", device="auto"):
+    def __init__(self, checkpoint_path=None, model_type="auto", device="auto", env_name="doom"):
         self.device = get_safe_device(device)
         print(f"[NeuralEngine] Running on device: {self.device.upper()}")
         if self.device == "cpu":
@@ -79,7 +80,13 @@ class NeuralEngineState:
         self.world_model.eval()
         self.tokenizer.eval()
 
-        self.env = PhysicsGameEnv()
+        self.env_name = "doom" if env_name == "doom" else "arcade"
+        self.env = DoomMiniEnv() if self.env_name == "doom" else PhysicsGameEnv()
+        self.reset()
+
+    def set_env(self, env_name: str):
+        self.env_name = "doom" if env_name == "doom" else "arcade"
+        self.env = DoomMiniEnv() if self.env_name == "doom" else PhysicsGameEnv()
         self.reset()
 
     def reset(self):
@@ -178,6 +185,15 @@ class NeuralEngineHandler(BaseHTTPRequestHandler):
             self.send_header("Content-type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps({"status": "reset_complete"}).encode("utf-8"))
+
+        elif parsed.path == "/set_env":
+            params = parse_qs(parsed.query)
+            env_choice = params.get("env", ["doom"])[0]
+            ENGINE.set_env(env_choice)
+            self.send_response(200)
+            self.send_header("Content-type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"status": "env_changed", "env": ENGINE.env_name}).encode("utf-8"))
 
         else:
             self.send_response(404)
@@ -329,17 +345,27 @@ HTML_UI = """<!DOCTYPE html>
     </div>
   </div>
 
-  <div class="controls">
-    <button onclick="sendAction(1)">&larr; Left (A)</button>
-    <button onclick="sendAction(0)">Stay (S)</button>
-    <button onclick="sendAction(2)">Right (D) &rarr;</button>
+  <div class="controls" id="env-control-bar" style="margin-bottom: 12px;">
+    <label style="font-size: 13px; color: #94a3b8; font-weight: bold; margin-right: 8px;">Active Game:</label>
+    <select id="env-select" onchange="changeEnv(this.value)" style="background: #1e293b; color: #f8fafc; border: 1px solid #38bdf8; border-radius: 6px; padding: 6px 12px; font-weight: bold; cursor: pointer;">
+      <option value="doom" selected>🔴 Doom 3D (First-Person Raycaster)</option>
+      <option value="arcade">🔵 Arcade (2D Breakout)</option>
+    </select>
+  </div>
+
+  <div class="controls" id="doom-controls">
+    <button onclick="sendAction(1)">&larr; Turn L (A)</button>
+    <button onclick="sendAction(3)">&uarr; Fwd (W)</button>
+    <button onclick="sendAction(4)">&darr; Back (S)</button>
+    <button onclick="sendAction(2)">Turn R (D) &rarr;</button>
+    <button onclick="sendAction(5)" style="background: #ef4444; box-shadow: 0 0 10px rgba(239, 68, 68, 0.4);">🔥 FIRE (Space)</button>
     <button onclick="toggleMode()" id="mode-btn" style="background: #8b5cf6;">Mode: Neural</button>
     <button onclick="resetEngine()" style="background: #e11d48;">Reset</button>
   </div>
 
-  <div class="instructions">
-    Use <b>A / D</b> or <b>Arrow Keys &larr; &rarr;</b> on your keyboard to play.<br>
-    Every pixel and reward is simulated by the <b>Mundus 0.1</b> neural network in real-time.
+  <div class="instructions" id="instructions-txt">
+    <b>Doom 3D Controls:</b> <b>W / S</b> = Move Fwd/Back &bull; <b>A / D</b> = Turn Left/Right &bull; <b>Space</b> = Fire Weapon &bull; <b>R</b> = Reset<br>
+    Simulated in 3D perspective by <b>Mundus 0.1</b> neural dynamics.
   </div>
 
   <script>
@@ -372,19 +398,51 @@ HTML_UI = """<!DOCTYPE html>
       }
     }
 
+    let activeEnv = "doom";
+
+    async function changeEnv(envChoice) {
+      activeEnv = envChoice;
+      await fetch(`/set_env?env=${envChoice}`);
+      if (activeEnv === "doom") {
+        document.getElementById('instructions-txt').innerHTML = "<b>Doom 3D Controls:</b> <b>W / S</b> = Move Fwd/Back &bull; <b>A / D</b> = Turn Left/Right &bull; <b>Space</b> = Fire Weapon &bull; <b>R</b> = Reset<br>Simulated in 3D perspective by <b>Mundus 0.1</b> neural dynamics.";
+      } else {
+        document.getElementById('instructions-txt').innerHTML = "<b>Arcade 2D Controls:</b> <b>A / D</b> or <b>Left/Right</b> = Move Paddle &bull; <b>S</b> = Stay &bull; <b>R</b> = Reset<br>Simulated by <b>Mundus 0.1</b> neural dynamics.";
+      }
+      sendAction(0);
+    }
+
     async function resetEngine() {
       await fetch('/reset');
       sendAction(0);
     }
 
-    // Keyboard bindings
+    // Keyboard bindings for Doom 3D and Arcade
     window.addEventListener('keydown', (e) => {
-      if (e.key === "ArrowLeft" || e.key === "a" || e.key === "A") {
-        sendAction(1);
-      } else if (e.key === "ArrowRight" || e.key === "d" || e.key === "D") {
-        sendAction(2);
-      } else if (e.key === "ArrowDown" || e.key === "s" || e.key === "S") {
-        sendAction(0);
+      if (activeEnv === "doom") {
+        if (e.key === "w" || e.key === "W" || e.key === "ArrowUp") {
+          sendAction(3); // Forward
+        } else if (e.key === "s" || e.key === "S" || e.key === "ArrowDown") {
+          sendAction(4); // Backward
+        } else if (e.key === "a" || e.key === "A" || e.key === "ArrowLeft") {
+          sendAction(1); // Turn Left
+        } else if (e.key === "d" || e.key === "D" || e.key === "ArrowRight") {
+          sendAction(2); // Turn Right
+        } else if (e.key === " " || e.code === "Space") {
+          e.preventDefault();
+          sendAction(5); // Shoot / Fire
+        } else if (e.key === "r" || e.key === "R") {
+          resetEngine();
+        }
+      } else {
+        if (e.key === "ArrowLeft" || e.key === "a" || e.key === "A") {
+          sendAction(1);
+        } else if (e.key === "ArrowRight" || e.key === "d" || e.key === "D") {
+          sendAction(2);
+        } else if (e.key === "ArrowDown" || e.key === "s" || e.key === "S") {
+          sendAction(0);
+        } else if (e.key === "r" || e.key === "R") {
+          resetEngine();
+        }
       }
     });
 
@@ -402,10 +460,11 @@ def main():
     parser.add_argument("--checkpoint", type=str, default=None, help="Path to checkpoint")
     parser.add_argument("--model", type=str, default="auto", choices=["auto", "85m", "130m", "230m"], help="Model preset")
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"], help="Device to use ('auto', 'cpu', 'cuda')")
+    parser.add_argument("--env", type=str, default="doom", choices=["doom", "arcade"], help="Default game environment ('doom' or 'arcade')")
     args = parser.parse_args()
 
     global ENGINE
-    ENGINE = NeuralEngineState(checkpoint_path=args.checkpoint, model_type=args.model, device=args.device)
+    ENGINE = NeuralEngineState(checkpoint_path=args.checkpoint, model_type=args.model, device=args.device, env_name=args.env)
 
     server = HTTPServer(("0.0.0.0", args.port), NeuralEngineHandler)
     print(f"\n=======================================================")

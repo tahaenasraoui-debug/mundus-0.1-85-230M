@@ -23,6 +23,7 @@ from config import TokenizerConfig, WorldModelConfig, TrainConfig, get_config_23
 from tokenizer import VQVAE
 from world_model import WorldModel
 from dataset import PhysicsGameEnv, collect_trajectories, WorldModelDataset
+from doom_env import DoomMiniEnv, collect_doom_trajectories
 
 
 def train_tokenizer(
@@ -213,6 +214,7 @@ def train_world_model(
 def main():
     parser = argparse.ArgumentParser(description="Train Mundus World Model")
     parser.add_argument("--model", type=str, default="85m", choices=["85m", "130m", "230m"], help="Model preset scale ('85m', '130m', '230m')")
+    parser.add_argument("--env", type=str, default="doom", choices=["doom", "arcade"], help="Game environment ('doom' 3D raycaster or 'arcade' 2D breakout)")
     parser.add_argument("--episodes", type=int, default=30, help="Number of episodes to record")
     parser.add_argument("--steps", type=int, default=1000, help="Training steps")
     parser.add_argument("--batch_size", type=int, default=2, help="Batch size")
@@ -244,8 +246,12 @@ def main():
     tokenizer = VQVAE(tok_cfg).to(device)
     world_model = WorldModel(wm_cfg).to(device)
 
-    print(f"Collecting {args.episodes} training trajectories from PhysicsGameEnv...")
-    episodes = collect_trajectories(num_episodes=args.episodes, episode_length=35)
+    if args.env == "doom":
+        print(f"Collecting {args.episodes} training trajectories from DoomMiniEnv (3D Raycaster)...")
+        episodes = collect_doom_trajectories(num_episodes=args.episodes, episode_length=35)
+    else:
+        print(f"Collecting {args.episodes} training trajectories from PhysicsGameEnv (Arcade 2D)...")
+        episodes = collect_trajectories(num_episodes=args.episodes, episode_length=35)
 
     # Stage 1: Quick tokenizer training
     train_tokenizer(tokenizer, episodes, epochs=4, batch_size=16, device=device)
