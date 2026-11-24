@@ -348,8 +348,8 @@ HTML_UI = """<!DOCTYPE html>
   <div class="controls" id="env-control-bar" style="margin-bottom: 12px;">
     <label style="font-size: 13px; color: #94a3b8; font-weight: bold; margin-right: 8px;">Active Game:</label>
     <select id="env-select" onchange="changeEnv(this.value)" style="background: #1e293b; color: #f8fafc; border: 1px solid #38bdf8; border-radius: 6px; padding: 6px 12px; font-weight: bold; cursor: pointer;">
-      <option value="doom" selected>🔴 Doom 3D (First-Person Raycaster)</option>
-      <option value="arcade">🔵 Arcade (2D Breakout)</option>
+      <option value="arcade" selected>🔵 Arcade (2D Breakout &bull; Trained 45k Checkpoint)</option>
+      <option value="doom">🔴 Doom 3D (First-Person Raycaster)</option>
     </select>
   </div>
 
@@ -398,15 +398,40 @@ HTML_UI = """<!DOCTYPE html>
       }
     }
 
-    let activeEnv = "doom";
+    let activeEnv = "arcade";
+
+    function updateControlButtons() {
+      const controlsDiv = document.getElementById('doom-controls');
+      const modeBtnText = currentMode === "neural" ? "Mode: Neural" : "Mode: Ground Truth";
+      if (activeEnv === "doom") {
+        controlsDiv.innerHTML = `
+          <button onclick="sendAction(1)">&larr; Turn L (A)</button>
+          <button onclick="sendAction(3)">&uarr; Fwd (W)</button>
+          <button onclick="sendAction(4)">&darr; Back (S)</button>
+          <button onclick="sendAction(2)">Turn R (D) &rarr;</button>
+          <button onclick="sendAction(5)" style="background: #ef4444; box-shadow: 0 0 10px rgba(239, 68, 68, 0.4);">🔥 FIRE (Space)</button>
+          <button onclick="toggleMode()" id="mode-btn" style="background: #8b5cf6;">${modeBtnText}</button>
+          <button onclick="resetEngine()" style="background: #e11d48;">Reset</button>
+        `;
+      } else {
+        controlsDiv.innerHTML = `
+          <button onclick="sendAction(1)">&larr; Left (A)</button>
+          <button onclick="sendAction(0)">Stay (S)</button>
+          <button onclick="sendAction(2)">Right (D) &rarr;</button>
+          <button onclick="toggleMode()" id="mode-btn" style="background: #8b5cf6;">${modeBtnText}</button>
+          <button onclick="resetEngine()" style="background: #e11d48;">Reset</button>
+        `;
+      }
+    }
 
     async function changeEnv(envChoice) {
       activeEnv = envChoice;
+      updateControlButtons();
       await fetch(`/set_env?env=${envChoice}`);
       if (activeEnv === "doom") {
-        document.getElementById('instructions-txt').innerHTML = "<b>Doom 3D Controls:</b> <b>W / S</b> = Move Fwd/Back &bull; <b>A / D</b> = Turn Left/Right &bull; <b>Space</b> = Fire Weapon &bull; <b>R</b> = Reset<br>Simulated in 3D perspective by <b>Mundus 0.1</b> neural dynamics.";
+        document.getElementById('instructions-txt').innerHTML = "<b>Doom 3D Controls:</b> <b>W / S</b> = Move Fwd/Back &bull; <b>A / D</b> = Turn Left/Right &bull; <b>Space</b> = Fire Weapon &bull; <b>R</b> = Reset<br>Simulated in 3D perspective by <b>Mundus 0.1</b>.";
       } else {
-        document.getElementById('instructions-txt').innerHTML = "<b>Arcade 2D Controls:</b> <b>A / D</b> or <b>Left/Right</b> = Move Paddle &bull; <b>S</b> = Stay &bull; <b>R</b> = Reset<br>Simulated by <b>Mundus 0.1</b> neural dynamics.";
+        document.getElementById('instructions-txt').innerHTML = "<b>Arcade 2D Controls:</b> <b>A / D</b> or <b>Left/Right</b> = Move Paddle &bull; <b>S</b> = Stay &bull; <b>R</b> = Reset<br>Trained 45,000 steps model &bull; Autoregressive neural simulation.";
       }
       sendAction(0);
     }
@@ -446,7 +471,8 @@ HTML_UI = """<!DOCTYPE html>
       }
     });
 
-    // Initial frame
+    // Initial frame & controls setup
+    updateControlButtons();
     sendAction(0);
   </script>
 </body>
@@ -460,7 +486,7 @@ def main():
     parser.add_argument("--checkpoint", type=str, default=None, help="Path to checkpoint")
     parser.add_argument("--model", type=str, default="auto", choices=["auto", "85m", "130m", "230m"], help="Model preset")
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"], help="Device to use ('auto', 'cpu', 'cuda')")
-    parser.add_argument("--env", type=str, default="doom", choices=["doom", "arcade"], help="Default game environment ('doom' or 'arcade')")
+    parser.add_argument("--env", type=str, default="arcade", choices=["doom", "arcade"], help="Default game environment ('doom' or 'arcade')")
     args = parser.parse_args()
 
     global ENGINE
