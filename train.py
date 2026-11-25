@@ -89,6 +89,9 @@ def train_world_model(
     dataset: WorldModelDataset,
     train_cfg: TrainConfig,
     device: str = "cpu",
+    amp: bool = True,
+    grad_accum_steps: int = 1,
+    use_adam8bit: bool = False,
 ):
     """
     Stage 2: Train the Transformer World Model on latent trajectory rollouts.
@@ -100,7 +103,9 @@ def train_world_model(
     print(f"STAGE 2: Training {model_name}")
     print("==========================================")
     params_breakdown = world_model.count_parameters()
-    print(f"Total Parameters: {params_breakdown['total']:,} ({params_breakdown['total'] / 1e6:.2f}M)")
+    total_p = params_breakdown["total"]
+    scale_str = f"{total_p / 1e9:.2f}B" if total_p >= 1e9 else f"{total_p / 1e6:.2f}M"
+    print(f"Total Parameters: {total_p:,} ({scale_str})")
     print(f"  - Transformer Layers ({world_model.config.n_layers}x): {params_breakdown['transformer_layers']:,}")
     print(f"  - Vocabulary & Action Embeddings: {params_breakdown['embeddings']:,}")
     print(f"  - Multi-Task Prediction Heads: {params_breakdown['prediction_heads']:,}")
@@ -108,12 +113,41 @@ def train_world_model(
 
     loader = DataLoader(dataset, batch_size=train_cfg.batch_size, shuffle=True)
 
-    optimizer = optim.AdamW(
-        world_model.parameters(),
-        lr=train_cfg.lr,
-        weight_decay=train_cfg.weight_decay,
-        betas=(0.9, 0.95),
-    )
+    if use_adam8bit:
+        try:
+            import bitsandbytes as bnb
+            optimizer = bnb.optim.AdamW8bit(
+                world_model.parameters(),
+                lr=train_cfg.lr,
+                weight_decay=train_cfg.weight_decay,
+                betas=(0.9, 0.95),
+            )
+            print("[Optimizer] Using 8-bit AdamW (bitsandbytes) for ultra-low VRAM!")
+        except ImportError:
+            print("[Optimizer] bitsandbytes not installed, falling back to standard AdamW.")
+            optimizer = optim.AdamW(
+                world_model.parameters(),
+                lr=train_cfg.lr,
+                weight_decay=train_cfg.weight_decay,
+                betas=(0.9, 0.95),
+            )
+    else:
+        optimizer = optim.AdamW(
+            world_model.parameters(),
+            lr=train_cfg.lr,
+            weight_decay=train_cfg.weight_decay,
+            betas=(0.9, 0.95),
+        )
+
+    use_cuda = device.startswith("cuda")
+    amp_enabled = use_cuda and amp
+    amp_dtype = torch.bfloat16 if (use_cuda and torch.cuda.is_bf16_supported()) else torch.float16
+    scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
+
+    if amp_enabled:
+        print(f"[AMP] Mixed Precision enabled (dtype: {amp_dtype})")
+    if grad_accum_steps > 1:
+        print(f"[Grad Accum] Effective batch size: {train_cfg.batch_size * grad_accum_steps} (accum={grad_accum_steps})")
 
     # Cosine annealing with warmup
     def get_lr(step: int) -> float:
@@ -133,6 +167,7 @@ def train_world_model(
     ckpt_dir = Path(train_cfg.checkpoint_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     step_prefix = f"{model_slug}_step_"
+    optimizer.zero_grad()
 
     while step < train_cfg.max_steps:
         for batch in loader:
@@ -147,22 +182,26 @@ def train_world_model(
             target_dones = batch["target_dones"].to(device)
             visual_mask = batch["visual_mask"].to(device)
 
-            optimizer.zero_grad()
-            losses = world_model.compute_loss(
-                token_seq=token_seq,
-                target_tokens=target_tokens,
-                target_rewards=target_rewards,
-                target_dones=target_dones,
-                visual_mask=visual_mask,
-            )
+            with torch.amp.autocast("cuda", enabled=amp_enabled, dtype=amp_dtype):
+                losses = world_model.compute_loss(
+                    token_seq=token_seq,
+                    target_tokens=target_tokens,
+                    target_rewards=target_rewards,
+                    target_dones=target_dones,
+                    visual_mask=visual_mask,
+                )
+                total_loss = losses["total_loss"]
+                loss_to_backprop = total_loss / grad_accum_steps
 
-            total_loss = losses["total_loss"]
-            total_loss.backward()
+            scaler.scale(loss_to_backprop).backward()
 
-            if train_cfg.grad_clip > 0:
-                torch.nn.utils.clip_grad_norm_(world_model.parameters(), train_cfg.grad_clip)
-
-            optimizer.step()
+            if step % grad_accum_steps == 0:
+                if train_cfg.grad_clip > 0:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(world_model.parameters(), train_cfg.grad_clip)
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
 
             running_loss += total_loss.item()
             running_tok_loss += losses["token_loss"].item()
@@ -233,8 +272,8 @@ def main():
         "--model",
         type=str,
         default="85m",
-        choices=["85m", "130m", "230m"],
-        help="Model preset scale ('85m', '130m', '230m')",
+        choices=["85m", "130m", "230m", "3b"],
+        help="Model preset scale ('85m', '130m', '230m', '3b')",
     )
     parser.add_argument(
         "--env",
@@ -246,7 +285,11 @@ def main():
     parser.add_argument("--episodes", type=int, default=30, help="Number of episodes to record")
     parser.add_argument("--steps", type=int, default=1000, help="Training steps")
     parser.add_argument("--batch_size", type=int, default=2, help="Batch size")
+    parser.add_argument("--grad_accum", type=int, default=1, help="Gradient accumulation steps")
     parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
+    parser.add_argument("--amp", action="store_true", default=True, help="Use Mixed Precision (FP16/BF16)")
+    parser.add_argument("--no_amp", action="store_false", dest="amp", help="Disable Mixed Precision")
+    parser.add_argument("--adam8bit", action="store_true", help="Use 8-bit Adam via bitsandbytes (vital for 3B on 16GB GPUs)")
     parser.add_argument("--tokenizer_epochs", type=int, default=4, help="Stage 1 VQ-VAE tokenizer epochs")
     parser.add_argument(
         "--checkpoint_dir",
@@ -306,7 +349,15 @@ def main():
     dataset = WorldModelDataset(episodes, tokenizer, wm_cfg, seq_frames=4, device=device)
     print(f"Generated {len(dataset)} transition chunks for training.")
 
-    train_world_model(world_model, dataset, train_cfg, device=device)
+    train_world_model(
+        world_model,
+        dataset,
+        train_cfg,
+        device=device,
+        amp=args.amp,
+        grad_accum_steps=args.grad_accum,
+        use_adam8bit=args.adam8bit,
+    )
 
 
 if __name__ == "__main__":

@@ -103,10 +103,31 @@ def get_config_230m() -> WorldModelConfig:
     )
 
 
+def get_config_3b() -> WorldModelConfig:
+    """
+    Mundus 3B Configuration (~3.18 Billion Parameters).
+    Designed for cloud GPU clusters (T4/L4/A100/H100) with FlashAttention & Mixed Precision.
+    """
+    return WorldModelConfig(
+        model_name="Mundus-0.1-3B",
+        version="0.1",
+        d_model=3072,
+        n_layers=28,
+        n_heads=24,
+        hidden_dim=8192,
+        vocab_size=2048,
+        num_actions=16,
+        max_seq_len=2048,
+        tokens_per_frame=64,
+        dropout=0.0,
+    )
+
+
 MODEL_PRESETS = {
     "85m": get_config_85m,
     "130m": get_config_130m,
     "230m": get_config_230m,
+    "3b": get_config_3b,
 }
 
 
