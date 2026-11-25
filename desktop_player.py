@@ -18,7 +18,7 @@ if os.environ.get("CUDA_VISIBLE_DEVICES") is None:
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
 from config import DEFAULT_TOKENIZER_PATH, TokenizerConfig, get_config, get_config_85m  # noqa: E402
-from dataset import PhysicsGameEnv  # noqa: E402
+from games import get_game_env, list_games  # noqa: E402
 from tokenizer import VQVAE  # noqa: E402
 from world_model import WorldModel  # noqa: E402
 
@@ -36,8 +36,15 @@ def main():
         "--model",
         type=str,
         default="auto",
-        choices=["auto", "85m", "130m", "230m"],
+        choices=["auto", "85m", "130m", "230m", "3b"],
         help="Model preset when no checkpoint config is present",
+    )
+    parser.add_argument(
+        "--env",
+        type=str,
+        default="doom",
+        choices=list_games(),
+        help=f"Game environment ({list_games()})",
     )
     args = parser.parse_args()
 
@@ -85,7 +92,7 @@ def main():
     world_model.eval()
     tokenizer.eval()
 
-    env = PhysicsGameEnv()
+    env = get_game_env(args.env)
     obs = env.reset()
 
     def prime_kv(frame_np: np.ndarray):

@@ -1,14 +1,18 @@
 """
-Mundus 0.1 - Live Interactive Neural Game Engine Player.
-Streams real-time neural rollouts and ground-truth simulations to a browser canvas
-with zero external GUI dependencies.
+Mundus 0.1 - Live Neural Game Engine Simulator.
+Zero-dependency browser game engine streaming to an HTML5 canvas via standard HTTP/JSON.
+Supports:
+  - 100% Neural Mode (world model autoregressive imagination from past KVs)
+  - Ground Truth Mode (direct physics simulation)
+  - Multi-game suite: Doom 3D, Platformer, Dungeon RPG, Grand Prix Racer
 """
 
 import argparse
 import base64
 import io
 import json
-import time
+import math
+import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -17,20 +21,22 @@ import numpy as np
 import torch
 from PIL import Image
 
-from config import DEFAULT_TOKENIZER_PATH, TokenizerConfig, get_config, get_config_230m
-from dataset import PhysicsGameEnv
-from doom_env import DoomMiniEnv
+from config import (
+    DEFAULT_CHECKPOINT_DIR,
+    DEFAULT_TOKENIZER_PATH,
+    TokenizerConfig,
+    WorldModelConfig,
+    get_config,
+    get_config_85m,
+    get_config_230m,
+    get_config_3b,
+)
+from games import GAME_REGISTRY, get_game_env, list_games
 from tokenizer import VQVAE
 from world_model import WorldModel
 
-BASE_DIR = Path(__file__).resolve().parent
 
-VALID_ENVS = ("arcade", "doom")
-VALID_MODES = ("neural", "hybrid", "ground_truth")
-ENV_ACTION_RANGES: dict[str, range] = {
-    "arcade": range(3),  # 0=Stay, 1=Left, 2=Right
-    "doom": range(6),  # 0=Idle, 1=Turn L, 2=Turn R, 3=Fwd, 4=Back, 5=Fire
-}
+VALID_MODES = {"neural", "ground_truth"}
 
 
 def get_safe_device(requested: str = "auto") -> str:
@@ -39,7 +45,6 @@ def get_safe_device(requested: str = "auto") -> str:
         return "cpu"
     if torch.cuda.is_available():
         try:
-            # Test a basic tensor operation to verify kernel availability
             _ = torch.zeros(1, device="cuda") + 1.0
             return "cuda"
         except Exception:
@@ -66,7 +71,6 @@ class NeuralEngineState:
         self.tok_config = TokenizerConfig()
         self.tokenizer = VQVAE(self.tok_config).to(self.device)
 
-        # Check for standalone permanent tokenizer checkpoint (relative to repo root by default)
         tok_file = Path(tokenizer_path) if tokenizer_path is not None else DEFAULT_TOKENIZER_PATH
         tok_loaded = False
         if tok_file.exists():
@@ -75,7 +79,6 @@ class NeuralEngineState:
             tok_loaded = True
 
         ckpt_file = Path(checkpoint_path) if checkpoint_path is not None else None
-        # Auto-detect config from checkpoint if available
         if ckpt_file is not None and ckpt_file.exists():
             print(f"[NeuralEngine] Loading weights from {ckpt_file}...")
             ckpt = torch.load(ckpt_file, map_location=self.device, weights_only=False)
@@ -86,7 +89,7 @@ class NeuralEngineState:
                     f"(Layers: {self.wm_config.n_layers}, Dim: {self.wm_config.d_model})"
                 )
             else:
-                self.wm_config = get_config(model_type) if model_type != "auto" else get_config_230m()
+                self.wm_config = get_config(model_type) if model_type != "auto" else get_config_85m()
 
             self.world_model = WorldModel(self.wm_config).to(self.device)
             if "world_model" in ckpt:
@@ -95,25 +98,22 @@ class NeuralEngineState:
                 self.tokenizer.load_state_dict(ckpt["tokenizer"])
             print("[NeuralEngine] Loaded checkpoint successfully!")
         else:
-            self.wm_config = get_config(model_type) if model_type != "auto" else get_config_230m()
+            self.wm_config = get_config(model_type) if model_type != "auto" else get_config_85m()
             self.world_model = WorldModel(self.wm_config).to(self.device)
             print(f"[NeuralEngine] Running in live zero-shot mode ({self.wm_config.model_name}).")
 
         self.world_model.eval()
         self.tokenizer.eval()
 
-        self.env_name = "doom" if env_name == "doom" else "arcade"
-        self.env = DoomMiniEnv() if self.env_name == "doom" else PhysicsGameEnv()
+        self.env_name = env_name if env_name in GAME_REGISTRY else "doom"
+        self.env = get_game_env(self.env_name)
         self.reset()
 
     def valid_actions(self) -> range:
-        """Returns the valid discrete action range for the currently active environment."""
-        env_range = ENV_ACTION_RANGES[self.env_name]
-        upper = min(env_range.stop, self.world_model.config.num_actions)
-        return range(0, upper)
+        num_acts = len(GAME_REGISTRY[self.env_name]["actions"])
+        return range(0, num_acts)
 
     def validate_action(self, action: int) -> int:
-        """Validates that action is an integer within the active environment's valid action space."""
         if isinstance(action, bool) or not isinstance(action, int):
             raise ValueError(f"Action must be an integer, got {type(action).__name__}")
         valid = self.valid_actions()
@@ -125,104 +125,82 @@ class NeuralEngineState:
         return action
 
     def validate_mode(self, mode: str) -> str:
-        """Validates that mode is one of the supported engine modes."""
         if mode not in VALID_MODES:
             raise ValueError(f"Invalid mode '{mode}'. Expected one of: {', '.join(VALID_MODES)}.")
         return mode
 
     def set_env(self, env_name: str):
-        if env_name not in VALID_ENVS:
-            raise ValueError(f"Invalid environment '{env_name}'. Expected one of: {', '.join(VALID_ENVS)}.")
+        if env_name not in GAME_REGISTRY:
+            raise ValueError(f"Unknown game '{env_name}'. Choose from: {list(GAME_REGISTRY.keys())}")
         self.env_name = env_name
-        self.env = DoomMiniEnv() if self.env_name == "doom" else PhysicsGameEnv()
+        self.env = get_game_env(env_name)
         self.reset()
 
-    def _prime_kv_cache(self, frame: np.ndarray):
-        """Primes the world model KV-cache with the provided RGB frame."""
-        frame_t = torch.from_numpy(frame).permute(2, 0, 1).unsqueeze(0).float().to(self.device)
-        with torch.no_grad():
-            prompt_tokens = self.tokenizer.encode(frame_t)
-            out = self.world_model(prompt_tokens, use_cache=True)
-            self.past_kvs = out["new_kvs"]
-            self._kv_synced = True
-
     def reset(self):
-        self.current_frame = self.env.reset()  # (64, 64, 3)
+        self.current_frame = self.env.reset()
         self.past_kvs = None
         self.step_count = 0
         self.predicted_score = 0.0
         self.gt_score = 0.0
         self.done = False
-        self._kv_synced = False
-        self._prime_kv_cache(self.current_frame)
 
-    def step(self, action: int, mode: str = "neural") -> dict:
-        """
-        Takes an action and returns the next frame and telemetry metadata.
-        mode:
-          - "neural": pure neural imagination frame + neural predictions
-          - "hybrid": ground truth frame + neural predictions
-          - "ground_truth": ground truth simulator frame only (skips autoregressive rollout)
-        """
+        frame_t = torch.from_numpy(self.current_frame).permute(2, 0, 1).unsqueeze(0).float().to(self.device)
+        with torch.no_grad():
+            prompt_tokens = self.tokenizer.encode(frame_t)
+            out = self.world_model(prompt_tokens, use_cache=True)
+            self.past_kvs = out["new_kvs"]
+
+    def step(self, action: int, mode="neural"):
         action = self.validate_action(action)
         mode = self.validate_mode(mode)
 
-        # If the previous step terminated the episode, cleanly reset before stepping again
-        episode_reset = False
         if self.done:
             self.reset()
-            episode_reset = True
 
         self.step_count += 1
-        t0 = time.time()
+        t0 = torch.cuda.Event(enable_timing=True) if self.device == "cuda" else None
+        t1 = torch.cuda.Event(enable_timing=True) if self.device == "cuda" else None
+
+        if t0 is not None:
+            t0.record()
+            wall_t0 = None
+        else:
+            import time
+            wall_t0 = time.perf_counter()
 
         gt_frame, gt_reward, gt_done = self.env.step(action)
         self.gt_score += float(gt_reward)
         self.done = bool(gt_done)
 
-        if mode == "ground_truth":
-            pred_reward = 0.0
-            done_prob_val = 1.0 if gt_done else 0.0
-            display_frame = gt_frame
-            self.current_frame = gt_frame
-            self._kv_synced = False
-        else:
-            # Re-prime KV-cache if switching back from ground_truth mode or nearing context limit
-            tokens_needed = self.world_model.config.tokens_per_frame + 1
-            if (
-                not self._kv_synced
-                or self.past_kvs is None
-                or self.past_kvs[0][0].shape[2] + tokens_needed > self.world_model.config.max_seq_len
-            ):
-                self._prime_kv_cache(self.current_frame)
+        with torch.no_grad():
+            act_token = torch.tensor([[action + self.world_model.config.vocab_size]], device=self.device)
+            next_tok, rew, done_prob, self.past_kvs = self.world_model.imagine_step(
+                act_token, past_kvs=self.past_kvs, temperature=0.8, top_k=50
+            )
 
-            with torch.no_grad():
-                act_token = torch.tensor([[action + self.world_model.config.vocab_size]], device=self.device)
-                next_tok, rew, done_prob, self.past_kvs = self.world_model.imagine_step(
-                    act_token, past_kvs=self.past_kvs, temperature=0.8, top_k=50
+            frame_tokens = [next_tok]
+            curr_tok = next_tok
+            K = self.world_model.config.tokens_per_frame
+            for _ in range(K - 1):
+                curr_tok, _, _, self.past_kvs = self.world_model.imagine_step(
+                    curr_tok, past_kvs=self.past_kvs, temperature=0.8, top_k=50
                 )
+                frame_tokens.append(curr_tok)
 
-                frame_tokens = [next_tok]
-                curr_tok = next_tok
-                K = self.world_model.config.tokens_per_frame
-                for _ in range(K - 1):
-                    curr_tok, _, _, self.past_kvs = self.world_model.imagine_step(
-                        curr_tok, past_kvs=self.past_kvs, temperature=0.8, top_k=50
-                    )
-                    frame_tokens.append(curr_tok)
+            all_frame_tokens = torch.cat(frame_tokens, dim=1)
+            neural_frame = self.tokenizer.decode_tokens(all_frame_tokens).squeeze(0).permute(1, 2, 0).cpu().numpy()
 
-                all_frame_tokens = torch.cat(frame_tokens, dim=1)
-                neural_frame = self.tokenizer.decode_tokens(all_frame_tokens).squeeze(0).permute(1, 2, 0).cpu().numpy()
+        if t1 is not None:
+            t1.record()
+            torch.cuda.synchronize()
+            latency_ms = t0.elapsed_time(t1)
+        else:
+            import time
+            latency_ms = (time.perf_counter() - wall_t0) * 1000.0
 
-            pred_reward = float(rew.item())
-            done_prob_val = float(done_prob.item())
-            self.predicted_score += pred_reward
-            display_frame = neural_frame if mode == "neural" else gt_frame
-            self.current_frame = display_frame
+        self.predicted_score += rew.item()
+        display_frame = neural_frame if mode == "neural" else gt_frame
 
-        latency_ms = (time.time() - t0) * 1000.0
-
-        # Convert frame to Base64 JPEG
         img_np = (np.clip(display_frame, 0.0, 1.0) * 255.0).astype(np.uint8)
         pil_img = Image.fromarray(img_np).resize((384, 384), Image.NEAREST)
         buffer = io.BytesIO()
@@ -232,84 +210,53 @@ class NeuralEngineState:
         return {
             "image": img_b64,
             "step": self.step_count,
-            "env": self.env_name,
-            "mode": mode,
-            "predicted_reward": round(pred_reward, 3),
+            "predicted_reward": round(rew.item(), 3),
             "total_score": round(self.predicted_score, 2),
-            "done_prob": round(done_prob_val, 3),
+            "done_prob": round(done_prob.item(), 3),
             "latency_ms": round(latency_ms, 1),
             "gt_reward": round(float(gt_reward), 3),
             "gt_score": round(self.gt_score, 2),
             "gt_done": bool(gt_done),
-            "episode_reset": episode_reset,
+            "env_name": self.env_name,
         }
 
 
-# Global engine instance for HTTP request handler
 ENGINE: NeuralEngineState | None = None
 
 
-def render_html_ui(engine: NeuralEngineState | None) -> str:
-    """Injects active engine metadata (model name, parameter count, active env) into the HTML UI."""
-    if engine is not None:
-        model_name = engine.wm_config.model_name
-        total_params_m = engine.world_model.count_parameters()["total"] / 1e6
-        active_env = engine.env_name
-    else:
-        model_name = "Mundus-0.1"
-        total_params_m = 0.0
-        active_env = "arcade"
-
-    arcade_selected = " selected" if active_env == "arcade" else ""
-    doom_selected = " selected" if active_env == "doom" else ""
-
-    return (
-        HTML_UI.replace("__MODEL_NAME__", model_name)
-        .replace("__PARAMS_M__", f"{total_params_m:.1f}M")
-        .replace("__ACTIVE_ENV__", active_env)
-        .replace("__ARCADE_SELECTED__", arcade_selected)
-        .replace("__DOOM_SELECTED__", doom_selected)
-    )
-
-
 class NeuralEngineHandler(BaseHTTPRequestHandler):
-    def _send_json(self, status_code: int, payload: dict):
-        self.send_response(status_code)
+    def _send_json(self, status: int, payload: dict):
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
         self.send_header("Content-type", "application/json")
         self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(json.dumps(payload).encode("utf-8"))
+        self.wfile.write(body)
 
     def do_GET(self):
         parsed = urlparse(self.path)
-        if parsed.path in ("/", "/index.html"):
+        if parsed.path == "/" or parsed.path == "/index.html":
+            total_params = ENGINE.world_model.count_parameters()["total"]
+            scale_str = f"{total_params / 1e9:.2f}B" if total_params >= 1e9 else f"{total_params / 1e6:.1f}M"
+            
+            html = HTML_UI.replace("__MODEL_NAME__", ENGINE.wm_config.model_name)
+            html = html.replace("__PARAMS_M__", scale_str)
+            html = html.replace("__ACTIVE_ENV__", ENGINE.env_name)
+
+            body = html.encode("utf-8")
             self.send_response(200)
-            self.send_header("Content-type", "text/html; charset=utf-8")
+            self.send_header("Content-type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(render_html_ui(ENGINE).encode("utf-8"))
-
-        elif parsed.path in ("/state", "/step", "/reset", "/set_env") and ENGINE is None:
-            self._send_json(503, {"error": "Engine is not initialized."})
-
-        elif parsed.path == "/state":
-            self._send_json(
-                200,
-                {
-                    "env": ENGINE.env_name,
-                    "model_name": ENGINE.wm_config.model_name,
-                    "valid_actions": list(ENGINE.valid_actions()),
-                    "done": ENGINE.done,
-                    "step": ENGINE.step_count,
-                },
-            )
+            self.wfile.write(body)
 
         elif parsed.path == "/step":
-            params = parse_qs(parsed.query, keep_blank_values=True)
-            raw_action = params.get("action", ["0"])[0]
+            params = parse_qs(parsed.query)
             try:
-                action = int(raw_action)
-            except (TypeError, ValueError):
-                self._send_json(400, {"error": f"Invalid action '{raw_action}': must be an integer."})
+                action = int(params.get("action", [0])[0])
+            except (ValueError, TypeError):
+                self._send_json(400, {"error": "Invalid action parameter; must be an integer."})
                 return
 
             mode = params.get("mode", ["neural"])[0]
@@ -326,7 +273,7 @@ class NeuralEngineHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"status": "reset_complete", "env": ENGINE.env_name})
 
         elif parsed.path == "/set_env":
-            params = parse_qs(parsed.query, keep_blank_values=True)
+            params = parse_qs(parsed.query)
             env_choice = params.get("env", ["doom"])[0]
             try:
                 ENGINE.set_env(env_choice)
@@ -339,7 +286,6 @@ class NeuralEngineHandler(BaseHTTPRequestHandler):
             self._send_json(404, {"error": f"Unknown endpoint '{parsed.path}'."})
 
     def log_message(self, format, *args):
-        # Silence verbose HTTP logging
         return
 
 
@@ -473,7 +419,7 @@ HTML_UI = """<!DOCTYPE html>
   <div class="dashboard">
     <div class="screen-container">
       <img id="screen" src="" alt="Neural Game Frame" />
-      <div id="episode-banner">Episode Ended &mdash; Press R / Reset or any action key to start a new episode.</div>
+      <div id="episode-banner">Episode Finished &mdash; Press R or any key to restart.</div>
     </div>
 
     <div class="telemetry">
@@ -503,19 +449,63 @@ HTML_UI = """<!DOCTYPE html>
   <div class="controls" id="env-control-bar" style="margin-bottom: 12px;">
     <label style="font-size: 13px; color: #94a3b8; font-weight: bold; margin-right: 8px;">Active Game:</label>
     <select id="env-select" onchange="changeEnv(this.value); this.blur();" style="background: #1e293b; color: #f8fafc; border: 1px solid #38bdf8; border-radius: 6px; padding: 6px 12px; font-weight: bold; cursor: pointer;">
-      <option value="arcade"__ARCADE_SELECTED__>🔵 Arcade (2D Breakout)</option>
-      <option value="doom"__DOOM_SELECTED__>🔴 Doom 3D (First-Person Raycaster)</option>
+      <option value="doom" selected>🔴 Doom 3D (First-Person Raycaster)</option>
+      <option value="platformer">🟢 Mundus Platformer (2D Mario Physics)</option>
+      <option value="dungeon">🗡️ Mundus Dungeon (Zelda Action RPG)</option>
+      <option value="racer">🏎️ Mundus Grand Prix (High-Speed Racer)</option>
     </select>
   </div>
 
   <div class="controls" id="game-controls"></div>
-
   <div class="instructions" id="instructions-txt"></div>
 
   <script>
     let isBusy = false;
     let currentMode = "neural";
     let activeEnv = "__ACTIVE_ENV__";
+
+    const GAME_META = {
+      doom: {
+        controls: "<b>Doom 3D Controls:</b> <b>W / S</b> = Move Fwd/Back &bull; <b>A / D</b> = Turn Left/Right &bull; <b>Space</b> = Fire Shotgun &bull; <b>R</b> = Reset",
+        buttons: [
+          { act: 1, label: "&larr; Turn L (A)" },
+          { act: 3, label: "&uarr; Fwd (W)" },
+          { act: 4, label: "&darr; Back (S)" },
+          { act: 2, label: "Turn R (D) &rarr;" },
+          { act: 5, label: "🔥 FIRE (Space)", color: "#ef4444" }
+        ]
+      },
+      platformer: {
+        controls: "<b>Platformer Controls:</b> <b>A / D</b> or <b>Left/Right</b> = Run &bull; <b>Space / W / Up</b> = Jump &bull; <b>S</b> = Crouch &bull; <b>R</b> = Reset",
+        buttons: [
+          { act: 1, label: "&larr; Run L (A)" },
+          { act: 0, label: "Idle" },
+          { act: 2, label: "Run R (D) &rarr;" },
+          { act: 3, label: "⬆ JUMP (Space/W)", color: "#10b981" },
+          { act: 4, label: "&darr; Crouch (S)" }
+        ]
+      },
+      dungeon: {
+        controls: "<b>Dungeon RPG Controls:</b> <b>W / S / A / D</b> = Move Cardinal &bull; <b>Space</b> = Sword Attack &bull; <b>R</b> = Reset",
+        buttons: [
+          { act: 1, label: "&uarr; Up (W)" },
+          { act: 2, label: "&darr; Down (S)" },
+          { act: 3, label: "&larr; Left (A)" },
+          { act: 4, label: "Right (D) &rarr;" },
+          { act: 5, label: "⚔️ ATTACK (Space)", color: "#f59e0b" }
+        ]
+      },
+      racer: {
+        controls: "<b>Grand Prix Controls:</b> <b>W / Up</b> = Gas &bull; <b>S / Down</b> = Brake &bull; <b>A / D</b> = Steer &bull; <b>Space</b> = Turbo Boost &bull; <b>R</b> = Reset",
+        buttons: [
+          { act: 1, label: "&larr; Steer L (A)" },
+          { act: 3, label: "🏎️ GAS (W)", color: "#0284c7" },
+          { act: 4, label: "🛑 BRAKE (S)", color: "#e11d48" },
+          { act: 2, label: "Steer R (D) &rarr;" },
+          { act: 5, label: "⚡ BOOST (Space)", color: "#8b5cf6" }
+        ]
+      }
+    };
 
     function updateModeTelemetryLabels() {
       const modeBtn = document.getElementById('mode-btn');
@@ -542,17 +532,11 @@ HTML_UI = """<!DOCTYPE html>
     }
 
     function updateInstructions() {
+      const meta = GAME_META[activeEnv] || GAME_META.doom;
       const modeDesc = currentMode === "neural"
-        ? "Autoregressive neural dynamics by <b>__MODEL_NAME__</b>."
-        : "Direct Ground Truth simulator physics (real environment).";
-
-      if (activeEnv === "doom") {
-        document.getElementById('instructions-txt').innerHTML =
-          "<b>Doom 3D Controls:</b> <b>W / S</b> = Move Fwd/Back &bull; <b>A / D</b> = Turn Left/Right &bull; <b>Space</b> = Fire Weapon &bull; <b>R</b> = Reset<br>" + modeDesc;
-      } else {
-        document.getElementById('instructions-txt').innerHTML =
-          "<b>Arcade 2D Controls:</b> <b>A / D</b> or <b>Left/Right</b> = Move Paddle &bull; <b>S</b> = Stay &bull; <b>R</b> = Reset<br>" + modeDesc;
-      }
+        ? "<br>Autoregressive neural dynamics by <b>__MODEL_NAME__</b>."
+        : "<br>Direct Ground Truth simulator physics.";
+      document.getElementById('instructions-txt').innerHTML = meta.controls + modeDesc;
     }
 
     function toggleMode() {
@@ -597,32 +581,25 @@ HTML_UI = """<!DOCTYPE html>
 
     function updateControlButtons() {
       const controlsDiv = document.getElementById('game-controls');
+      const meta = GAME_META[activeEnv] || GAME_META.doom;
       const modeBtnText = currentMode === "neural" ? "Mode: Neural" : "Mode: Ground Truth";
-      if (activeEnv === "doom") {
-        controlsDiv.innerHTML = `
-          <button onclick="sendAction(1)">&larr; Turn L (A)</button>
-          <button onclick="sendAction(3)">&uarr; Fwd (W)</button>
-          <button onclick="sendAction(4)">&darr; Back (S)</button>
-          <button onclick="sendAction(2)">Turn R (D) &rarr;</button>
-          <button onclick="sendAction(5)" style="background: #ef4444; box-shadow: 0 0 10px rgba(239, 68, 68, 0.4);">🔥 FIRE (Space)</button>
-          <button onclick="toggleMode()" id="mode-btn" style="background: #8b5cf6;">${modeBtnText}</button>
-          <button onclick="resetEngine()" style="background: #e11d48;">Reset</button>
-        `;
-      } else {
-        controlsDiv.innerHTML = `
-          <button onclick="sendAction(1)">&larr; Left (A)</button>
-          <button onclick="sendAction(0)">Stay (S)</button>
-          <button onclick="sendAction(2)">Right (D) &rarr;</button>
-          <button onclick="toggleMode()" id="mode-btn" style="background: #8b5cf6;">${modeBtnText}</button>
-          <button onclick="resetEngine()" style="background: #e11d48;">Reset</button>
-        `;
+
+      let btnHtml = "";
+      for (const btn of meta.buttons) {
+        const colorStyle = btn.color ? `background: ${btn.color};` : "";
+        btnHtml += `<button onclick="sendAction(${btn.act})" style="${colorStyle}">${btn.label}</button> `;
       }
+      btnHtml += `<button onclick="toggleMode()" id="mode-btn" style="background: #8b5cf6;">${modeBtnText}</button> `;
+      btnHtml += `<button onclick="resetEngine()" style="background: #e11d48;">Reset</button>`;
+
+      controlsDiv.innerHTML = btnHtml;
       updateModeTelemetryLabels();
       updateInstructions();
     }
 
     async function changeEnv(envChoice) {
       activeEnv = envChoice;
+      document.getElementById('env-select').value = envChoice;
       updateControlButtons();
       await fetch(`/set_env?env=${envChoice}`);
       document.getElementById('episode-banner').style.display = "none";
@@ -635,40 +612,45 @@ HTML_UI = """<!DOCTYPE html>
       sendAction(0);
     }
 
-    // Keyboard bindings for Doom 3D and Arcade
+    // Keyboard bindings per active game
     window.addEventListener('keydown', (e) => {
-      if (e.target && (e.target.tagName === "SELECT" || e.target.tagName === "INPUT")) {
+      if (e.target && (e.target.tagName === "SELECT" || e.target.tagName === "INPUT")) return;
+
+      if (e.key === "r" || e.key === "R") {
+        resetEngine();
         return;
       }
+
       if (activeEnv === "doom") {
-        if (e.key === "w" || e.key === "W" || e.key === "ArrowUp") {
-          sendAction(3); // Forward
-        } else if (e.key === "s" || e.key === "S" || e.key === "ArrowDown") {
-          sendAction(4); // Backward
-        } else if (e.key === "a" || e.key === "A" || e.key === "ArrowLeft") {
-          sendAction(1); // Turn Left
-        } else if (e.key === "d" || e.key === "D" || e.key === "ArrowRight") {
-          sendAction(2); // Turn Right
-        } else if (e.key === " " || e.code === "Space") {
-          e.preventDefault();
-          sendAction(5); // Shoot / Fire
-        } else if (e.key === "r" || e.key === "R") {
-          resetEngine();
-        }
-      } else {
-        if (e.key === "ArrowLeft" || e.key === "a" || e.key === "A") {
-          sendAction(1);
-        } else if (e.key === "ArrowRight" || e.key === "d" || e.key === "D") {
-          sendAction(2);
-        } else if (e.key === "ArrowDown" || e.key === "s" || e.key === "S") {
-          sendAction(0);
-        } else if (e.key === "r" || e.key === "R") {
-          resetEngine();
-        }
+        if (e.key === "w" || e.key === "W" || e.key === "ArrowUp") sendAction(3);
+        else if (e.key === "s" || e.key === "S" || e.key === "ArrowDown") sendAction(4);
+        else if (e.key === "a" || e.key === "A" || e.key === "ArrowLeft") sendAction(1);
+        else if (e.key === "d" || e.key === "D" || e.key === "ArrowRight") sendAction(2);
+        else if (e.key === " " || e.code === "Space") { e.preventDefault(); sendAction(5); }
+      }
+      else if (activeEnv === "platformer") {
+        if (e.key === "a" || e.key === "A" || e.key === "ArrowLeft") sendAction(1);
+        else if (e.key === "d" || e.key === "D" || e.key === "ArrowRight") sendAction(2);
+        else if (e.key === "w" || e.key === "W" || e.key === "ArrowUp" || e.key === " " || e.code === "Space") { e.preventDefault(); sendAction(3); }
+        else if (e.key === "s" || e.key === "S" || e.key === "ArrowDown") sendAction(4);
+      }
+      else if (activeEnv === "dungeon") {
+        if (e.key === "w" || e.key === "W" || e.key === "ArrowUp") sendAction(1);
+        else if (e.key === "s" || e.key === "S" || e.key === "ArrowDown") sendAction(2);
+        else if (e.key === "a" || e.key === "A" || e.key === "ArrowLeft") sendAction(3);
+        else if (e.key === "d" || e.key === "D" || e.key === "ArrowRight") sendAction(4);
+        else if (e.key === " " || e.code === "Space") { e.preventDefault(); sendAction(5); }
+      }
+      else if (activeEnv === "racer") {
+        if (e.key === "w" || e.key === "W" || e.key === "ArrowUp") sendAction(3);
+        else if (e.key === "s" || e.key === "S" || e.key === "ArrowDown") sendAction(4);
+        else if (e.key === "a" || e.key === "A" || e.key === "ArrowLeft") sendAction(1);
+        else if (e.key === "d" || e.key === "D" || e.key === "ArrowRight") sendAction(2);
+        else if (e.key === " " || e.code === "Space") { e.preventDefault(); sendAction(5); }
       }
     });
 
-    // Initial frame & controls setup
+    // Initialize UI on load
     updateControlButtons();
     sendAction(0);
   </script>
@@ -687,9 +669,9 @@ def main():
         default=str(DEFAULT_TOKENIZER_PATH),
         help="Path to standalone VQ-VAE tokenizer checkpoint",
     )
-    parser.add_argument("--model", type=str, default="auto", choices=["auto", "85m", "130m", "230m"], help="Model preset")
+    parser.add_argument("--model", type=str, default="auto", choices=["auto", "85m", "130m", "230m", "3b"], help="Model preset")
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"], help="Device ('auto', 'cpu', 'cuda')")
-    parser.add_argument("--env", type=str, default="arcade", choices=["doom", "arcade"], help="Default game environment ('doom' or 'arcade')")
+    parser.add_argument("--env", type=str, default="doom", choices=list_games(), help=f"Default game environment ({list_games()})")
     args = parser.parse_args()
 
     global ENGINE
@@ -705,6 +687,7 @@ def main():
     print("\n=======================================================")
     print("🌌 Mundus 0.1 Live Neural Engine running!")
     print(f"👉 Open in your browser: http://localhost:{args.port}")
+    print(f"🎮 Games available: {', '.join(list_games())}")
     print("=======================================================\n")
 
     try:

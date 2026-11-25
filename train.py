@@ -16,8 +16,8 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 
 from config import DEFAULT_CHECKPOINT_DIR, TokenizerConfig, TrainConfig, get_config
-from dataset import WorldModelDataset, collect_trajectories
-from doom_env import collect_doom_trajectories
+from dataset import WorldModelDataset
+from games import GAME_REGISTRY, collect_game_trajectories, list_games
 from tokenizer import VQVAE
 from world_model import WorldModel
 
@@ -279,8 +279,8 @@ def main():
         "--env",
         type=str,
         default="doom",
-        choices=["doom", "arcade"],
-        help="Game environment ('doom' 3D raycaster or 'arcade' 2D breakout)",
+        choices=list_games(),
+        help=f"Game environment ({list_games()})",
     )
     parser.add_argument("--episodes", type=int, default=30, help="Number of episodes to record")
     parser.add_argument("--steps", type=int, default=1000, help="Training steps")
@@ -327,12 +327,9 @@ def main():
     tokenizer = VQVAE(tok_cfg).to(device)
     world_model = WorldModel(wm_cfg).to(device)
 
-    if args.env == "doom":
-        print(f"Collecting {args.episodes} training trajectories from DoomMiniEnv (3D Raycaster)...")
-        episodes = collect_doom_trajectories(num_episodes=args.episodes, episode_length=35)
-    else:
-        print(f"Collecting {args.episodes} training trajectories from PhysicsGameEnv (Arcade 2D)...")
-        episodes = collect_trajectories(num_episodes=args.episodes, episode_length=35)
+    game_meta = GAME_REGISTRY[args.env]
+    print(f"Collecting {args.episodes} training trajectories from {game_meta['title']}...")
+    episodes = collect_game_trajectories(args.env, num_episodes=args.episodes, episode_length=35)
 
     # Stage 1: Train and save VQ-VAE visual tokenizer
     train_tokenizer(

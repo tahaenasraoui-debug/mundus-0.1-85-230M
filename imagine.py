@@ -12,7 +12,7 @@ import torch
 from PIL import Image
 
 from config import DEFAULT_TOKENIZER_PATH, TokenizerConfig, get_config, get_config_230m
-from dataset import PhysicsGameEnv
+from games import get_game_env, list_games
 from tokenizer import VQVAE
 from world_model import WorldModel
 
@@ -118,8 +118,15 @@ def main():
         "--model",
         type=str,
         default="auto",
-        choices=["auto", "85m", "130m", "230m"],
+        choices=["auto", "85m", "130m", "230m", "3b"],
         help="Model preset when no checkpoint config is present",
+    )
+    parser.add_argument(
+        "--env",
+        type=str,
+        default="doom",
+        choices=list_games(),
+        help=f"Game environment ({list_games()})",
     )
     parser.add_argument("--steps", type=int, default=15, help="Number of steps to imagine")
     parser.add_argument("--output_gif", type=str, default="mundus_imagination.gif", help="Output GIF path")
@@ -153,7 +160,7 @@ def main():
         world_model = WorldModel(wm_config).to(device)
 
     # Grab a starting seed frame from the environment
-    env = PhysicsGameEnv()
+    env = get_game_env(args.env)
     seed_frame = env.reset()
 
     # Generate an action script (e.g. Move right for 5 steps, stay for 3, left for remainder)

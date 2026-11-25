@@ -18,33 +18,46 @@
 
 ## 🎮 Supported Game Environments
 
-Mundus includes two self-contained game simulators written in native NumPy (zero external ROM dependencies):
+Mundus includes 4 self-contained retro game simulators written in native NumPy (zero external ROM dependencies):
 
 1. **🔴 Doom 3D (`doom_env.py`) — First-Person Raycaster**:
-   - 3D perspective projection with atmospheric depth shading.
-   - 3D billboard enemy demon sprites that patrol and attack.
-   - First-person double-barrel shotgun with walking bob & muzzle flash bursts.
-   - Hitscan shooting mechanics with blood impacts and rewards.
-   - **Controls**: `W` (Fwd), `S` (Back), `A` (Turn Left), `D` (Turn Right), `Space` (Fire Weapon).
+   - DDA 3D perspective projection with directional face lighting & atmospheric fog.
+   - Procedural wall shaders: Gothic brick, Tech steel with hazard stripes, Demonic rune pillars.
+   - 3D billboard demons with horns, glowing eyes, teeth, and death collapse animations.
+   - First-person double-barrel shotgun with wood stock, hands, brass bead, and recoil muzzle blast.
+   - Classic Doom status bar HUD with Doomguy face, health, and ammo counters.
+   - **Controls**: `W` (Fwd), `S` (Back), `A` (Turn Left), `D` (Turn Right), `Space` (Fire Shotgun), `R` (Reset).
 
-2. **🔵 Arcade 2D (`dataset.py`) — Physics Breakout**:
-   - Elastic ball collisions, paddle bounce English, brick destruction, and scoring.
-   - **Controls**: `A` / Left (Move Left), `D` / Right (Move Right), `S` (Stay).
+2. **🟢 Mundus Platformer (`platformer_env.py`) — 2D Super Mario Physics**:
+   - Continuous Newtonian jumping arcs, momentum, gravity ($g = 0.45$), and camera scrolling.
+   - Terracotta bricks, glowing '?' mystery blocks, floating coins, and stomping Goombas.
+   - **Controls**: `A` / `D` or `Left` / `Right` (Run), `Space` / `W` / `Up` (Jump), `S` (Crouch), `R` (Reset).
+
+3. **🗡️ Mundus Dungeon (`dungeon_env.py`) — Top-Down Zelda Action RPG**:
+   - Dynamic radial torchlight illumination cone with dark dungeon corners.
+   - Skeletons and slimes, golden treasure chests with ruby gems.
+   - Adventurer hero with tunic, shield, and silver sword attack sweeps.
+   - **Controls**: `W` / `S` / `A` / `D` (Move Cardinal), `Space` (Sword Attack), `R` (Reset).
+
+4. **🏎️ Mundus Grand Prix (`racer_env.py`) — Top-Down High-Speed Circuit Racer**:
+   - Continuous vehicle kinematics: acceleration, steering, tire drift friction, and grass runoff.
+   - Asphalt oval track with red & white apex kerbs, checkered finish line, and AI rival cars.
+   - **Controls**: `W` / `Up` (Gas), `S` / `Down` (Brake), `A` / `D` (Steer), `Space` (Turbo Boost), `R` (Reset).
 
 ---
 
 ## ⚡ Model Specifications
 
-| Specification | Mundus-85M (Active) | Mundus-230M (High-Capacity) |
-| :--- | :--- | :--- |
-| **Parameters** | **88.2 Million** | **232.1 Million** |
-| **Layers** | 12 SwiGLU Transformer Blocks | 18 SwiGLU Transformer Blocks |
-| **Hidden Dim ($d_{\text{model}}$)** | 768 | 1,024 |
-| **Attention Heads** | 12 ($d_{\text{head}} = 64$) | 16 ($d_{\text{head}} = 64$) |
-| **FeedForward Dim ($d_{\text{ff}}$)** | 2,048 (SwiGLU) | 2,752 (SwiGLU) |
-| **Positional Encoding** | Rotary Position Embeddings (RoPE) | Rotary Position Embeddings (RoPE) |
-| **VQ-VAE Codebook** | 2,048 Discrete Visual Codes | 2,048 Discrete Visual Codes |
-| **Hardware Footprint** | 1.68 GB VRAM (GTX 1050 Ready) | 3.52 GB RAM (Multi-Core CPU / High VRAM) |
+| Specification | Mundus-85M (Fast) | Mundus-230M (High-Capacity) | Mundus-3B (Cloud / Colab) |
+| :--- | :--- | :--- | :--- |
+| **Parameters** | **88.2 Million** | **232.1 Million** | **3.18 Billion** |
+| **Layers** | 12 SwiGLU Blocks | 18 SwiGLU Blocks | 28 SwiGLU Blocks |
+| **Hidden Dim ($d_{\text{model}}$)** | 768 | 1,024 | 3,072 |
+| **Attention Heads** | 12 ($d_{\text{head}} = 64$) | 16 ($d_{\text{head}} = 64$) | 24 ($d_{\text{head}} = 128$) |
+| **FeedForward Dim ($d_{\text{ff}}$)** | 2,048 (SwiGLU) | 2,752 (SwiGLU) | 8,192 (SwiGLU) |
+| **Positional Encoding** | RoPE (Rotary) | RoPE (Rotary) | RoPE (Rotary) |
+| **VQ-VAE Codebook** | 2,048 Visual Codes | 2,048 Visual Codes | 2,048 Visual Codes |
+| **Training Footprint** | 1.68 GB VRAM (GTX 1050) | 3.52 GB VRAM / RAM | ~13.5 GB (Colab T4 w/ 8-bit Adam) |
 
 ---
 
@@ -53,7 +66,8 @@ Mundus includes two self-contained game simulators written in native NumPy (zero
 ### 1. Installation
 
 ```bash
-cd mundus-0.1-85-230M
+cd mundus-world-model
+source mundus_env/bin/activate
 pip install -r requirements.txt
 ```
 
@@ -62,37 +76,29 @@ pip install -r requirements.txt
 Launch the browser engine:
 
 ```bash
-python3 web_player.py --port 8080
+python3 web_player.py --port 8080 --env doom
 ```
 
 Open **`http://localhost:8080`** in your browser.
-* Switch between **Doom 3D** and **Arcade 2D** using the dropdown at the top (or pass `--env doom` / `--env arcade`).
-* **Doom 3D Controls**: **`W` / `S`** (Move Fwd/Back), **`A` / `D`** (Turn Left/Right), **`Space`** (Fire Shotgun), **`R`** (Reset).
-* **Arcade 2D Controls**: **`A` / `D`** or **`Left` / `Right`** (Move Paddle), **`S`** (Stay), **`R`** (Reset).
+* Switch between **Doom 3D**, **Platformer**, **Dungeon RPG**, and **Grand Prix Racer** using the dropdown at the top.
 * Click the purple **Mode: Neural / Ground Truth** button anytime to toggle between the **100% Neural Hallucination** and the **Real Physics Simulator**.
 
-### 3. Play with the Native Desktop Player (2D Arcade / CPU)
+### 3. Training on Google Colab (3B Model)
 
-Launch the Pygame desktop player (runs the **2D Arcade** environment on **CPU**):
-
-```bash
-python3 desktop_player.py
-```
-
-* Optionally load trained weights with `--checkpoint <path>` and `--tokenizer <path>` (defaults to `checkpoints/tokenizer.pt`, and supports `--model 85m|130m|230m` when a checkpoint omits config metadata).
-* **Arcade 2D Controls**: **`A` / `Left`** (Move Left), **`D` / `Right`** (Move Right), **`S` / `Down`** (Stay), **`R`** (Reset), **`ESC` / `Q`** (Quit).
-
-### 4. Training from Scratch
+To train the 3.18B model on Google Colab GPUs (T4 16GB, L4 24GB, or A100 40GB), open [`train_colab.ipynb`](train_colab.ipynb) or run:
 
 ```bash
-# Train on Doom 3D (3D perspective raycasting)
-python3 train.py --model 85m --env doom --device cuda --episodes 300 --steps 45000 --batch_size 2
-
-# Or train on Arcade 2D (also supports --model 130m or 230m)
-python3 train.py --model 85m --env arcade --device cuda --episodes 300 --steps 45000 --batch_size 2
-
-# Standalone VQ-VAE tokenizer pre-training
-python3 train_tokenizer.py --env doom
+python3 train.py \
+    --model 3b \
+    --env doom \
+    --episodes 100 \
+    --steps 50000 \
+    --batch_size 1 \
+    --grad_accum 8 \
+    --lr 2e-4 \
+    --amp \
+    --adam8bit \
+    --device cuda
 ```
 
 ---
