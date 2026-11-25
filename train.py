@@ -278,15 +278,17 @@ def main():
     parser.add_argument(
         "--env",
         type=str,
-        default="doom",
+        default="all",
         choices=list_games(),
         help=f"Game environment ({list_games()})",
     )
-    parser.add_argument("--episodes", type=int, default=30, help="Number of episodes to record")
-    parser.add_argument("--steps", type=int, default=1000, help="Training steps")
+    parser.add_argument("--episodes", type=int, default=500, help="Number of episodes to record")
+    parser.add_argument("--episode_length", type=int, default=40, help="Steps per trajectory episode")
+    parser.add_argument("--steps", type=int, default=25000, help="Training steps")
     parser.add_argument("--batch_size", type=int, default=2, help="Batch size")
     parser.add_argument("--grad_accum", type=int, default=1, help="Gradient accumulation steps")
     parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
+    parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume training from")
     parser.add_argument("--amp", action="store_true", default=True, help="Use Mixed Precision (FP16/BF16)")
     parser.add_argument("--no_amp", action="store_false", dest="amp", help="Disable Mixed Precision")
     parser.add_argument("--adam8bit", action="store_true", help="Use 8-bit Adam via bitsandbytes (vital for 3B on 16GB GPUs)")
@@ -327,9 +329,26 @@ def main():
     tokenizer = VQVAE(tok_cfg).to(device)
     world_model = WorldModel(wm_cfg).to(device)
 
-    game_meta = GAME_REGISTRY[args.env]
-    print(f"Collecting {args.episodes} training trajectories from {game_meta['title']}...")
-    episodes = collect_game_trajectories(args.env, num_episodes=args.episodes, episode_length=35)
+    if args.resume:
+        resume_path = Path(args.resume)
+        if resume_path.exists():
+            print(f"[Resume] Loading checkpoint weights from {resume_path}...")
+            ckpt = torch.load(resume_path, map_location=device, weights_only=False)
+            if "world_model" in ckpt:
+                world_model.load_state_dict(ckpt["world_model"])
+            if "tokenizer" in ckpt:
+                tokenizer.load_state_dict(ckpt["tokenizer"])
+            print(f"[Resume] Successfully resumed from step {ckpt.get('step', 0)}!")
+        else:
+            print(f"[Resume] Warning: Checkpoint path '{resume_path}' not found. Starting from scratch.")
+
+    if args.env == "all":
+        print(f"Collecting {args.episodes} training trajectories across ALL 4 game universes...")
+        episodes = collect_game_trajectories("all", num_episodes=args.episodes, episode_length=args.episode_length)
+    else:
+        game_meta = GAME_REGISTRY[args.env]
+        print(f"Collecting {args.episodes} training trajectories from {game_meta['title']}...")
+        episodes = collect_game_trajectories(args.env, num_episodes=args.episodes, episode_length=args.episode_length)
 
     # Stage 1: Train and save VQ-VAE visual tokenizer
     train_tokenizer(

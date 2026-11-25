@@ -89,15 +89,32 @@ def get_game_env(game_id: str):
     return GAME_REGISTRY[gid]["env_class"]()
 
 
+def collect_all_games_trajectories(num_episodes_per_game: int = 150, episode_length: int = 40) -> List[Dict[str, np.ndarray]]:
+    """Records demonstrations across all 4 games and mixes them into a single multi-game dataset."""
+    import random
+    combined = []
+    print(f"\n[Multi-Game Dataset] Collecting demonstrations across all {len(GAME_REGISTRY)} game universes...")
+    for gid, meta in GAME_REGISTRY.items():
+        print(f"  --> Recording {num_episodes_per_game} episodes from {meta['title']}...")
+        eps = meta["collector"](num_episodes=num_episodes_per_game, episode_length=episode_length)
+        combined.extend(eps)
+    random.shuffle(combined)
+    print(f"[Multi-Game Dataset] Total combined dataset: {len(combined)} episodes across 4 games!\n")
+    return combined
+
+
 def collect_game_trajectories(game_id: str, num_episodes: int = 50, episode_length: int = 35) -> List[Dict[str, np.ndarray]]:
-    """Records autonomous demonstration trajectories for the given game."""
+    """Records autonomous demonstration trajectories for the given game (or all games)."""
     gid = game_id.lower().strip()
+    if gid == "all":
+        eps_per_game = max(10, num_episodes // len(GAME_REGISTRY))
+        return collect_all_games_trajectories(num_episodes_per_game=eps_per_game, episode_length=episode_length)
     if gid not in GAME_REGISTRY:
-        raise ValueError(f"Unknown game '{game_id}'. Available: {list(GAME_REGISTRY.keys())}")
+        raise ValueError(f"Unknown game '{game_id}'. Available: {list_games()}")
     collector_fn = GAME_REGISTRY[gid]["collector"]
     return collector_fn(num_episodes=num_episodes, episode_length=episode_length)
 
 
 def list_games() -> List[str]:
     """Returns list of valid game identifiers."""
-    return list(GAME_REGISTRY.keys())
+    return list(GAME_REGISTRY.keys()) + ["all"]

@@ -671,7 +671,8 @@ def main():
     )
     parser.add_argument("--model", type=str, default="auto", choices=["auto", "85m", "130m", "230m", "3b"], help="Model preset")
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"], help="Device ('auto', 'cpu', 'cuda')")
-    parser.add_argument("--env", type=str, default="doom", choices=list_games(), help=f"Default game environment ({list_games()})")
+    playable = [g for g in list_games() if g != "all"]
+    parser.add_argument("--env", type=str, default="doom", choices=playable, help=f"Default game environment ({playable})")
     args = parser.parse_args()
 
     global ENGINE
