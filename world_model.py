@@ -1,13 +1,12 @@
 """
-Mundus 0.1 (230M) - Causal Transformer World Model with Action Conditioning and KV Cache.
+Mundus 0.1 - Causal Transformer World Model with Action Conditioning and KV Cache.
 Implements the latent dynamics engine for environment simulation and imagination.
 """
 
-import math
-from typing import Optional, Tuple, Dict, List
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 from config import WorldModelConfig
 
 
@@ -24,11 +23,12 @@ class RMSNorm(nn.Module):
 
 class RotaryEmbedding(nn.Module):
     """Rotary Position Embeddings (RoPE) for relative sequence awareness."""
+
     def __init__(self, dim: int, max_seq_len: int = 4096, theta: float = 10000.0):
         super().__init__()
         self.dim = dim
         self.theta = theta
-        
+
         # inv_freq: (dim // 2)
         inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2).float() / dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
@@ -47,12 +47,12 @@ class RotaryEmbedding(nn.Module):
         x2 = x[..., d_2:]
         return torch.cat((-x2, x1), dim=-1)
 
-    def forward(self, q: torch.Tensor, k: torch.Tensor, offset: int = 0) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, q: torch.Tensor, k: torch.Tensor, offset: int = 0) -> tuple[torch.Tensor, torch.Tensor]:
         # q, k shape: (B, num_heads, seq_len, head_dim)
         seq_len = q.shape[2]
         cos = self.cos_cached[offset : offset + seq_len, :].unsqueeze(0).unsqueeze(0)
         sin = self.sin_cached[offset : offset + seq_len, :].unsqueeze(0).unsqueeze(0)
-        
+
         q_rot = (q * cos) + (self._rotate_half(q) * sin)
         k_rot = (k * cos) + (self._rotate_half(k) * sin)
         return q_rot, k_rot
@@ -60,6 +60,7 @@ class RotaryEmbedding(nn.Module):
 
 class SwiGLU(nn.Module):
     """SwiGLU FeedForward network (LLaMA / PaLM style)."""
+
     def __init__(self, d_model: int, hidden_dim: int, dropout: float = 0.0):
         super().__init__()
         self.w_gate = nn.Linear(d_model, hidden_dim, bias=False)
@@ -74,6 +75,7 @@ class SwiGLU(nn.Module):
 
 class CausalSelfAttention(nn.Module):
     """Multi-Head Causal Self-Attention with RoPE and KV-Cache."""
+
     def __init__(self, config: WorldModelConfig):
         super().__init__()
         self.d_model = config.d_model
@@ -92,9 +94,9 @@ class CausalSelfAttention(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        past_kv: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        past_kv: tuple[torch.Tensor, torch.Tensor] | None = None,
         use_cache: bool = False,
-    ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
         B, S, D = x.shape
 
         # Linear projections
@@ -114,9 +116,11 @@ class CausalSelfAttention(nn.Module):
 
         # Scaled dot-product attention
         # For single token autoregressive step with cache, attend to all past tokens
-        is_causal = (past_kv is None and S > 1)
+        is_causal = past_kv is None and S > 1
         out = F.scaled_dot_product_attention(
-            q, k, v,
+            q,
+            k,
+            v,
             attn_mask=None,
             dropout_p=self.dropout.p if self.training else 0.0,
             is_causal=is_causal,
@@ -129,6 +133,7 @@ class CausalSelfAttention(nn.Module):
 
 class TransformerBlock(nn.Module):
     """Pre-Norm Transformer Block with RMSNorm, Self-Attention, and SwiGLU."""
+
     def __init__(self, config: WorldModelConfig):
         super().__init__()
         self.attn_norm = RMSNorm(config.d_model, eps=config.norm_eps)
@@ -139,9 +144,9 @@ class TransformerBlock(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        past_kv: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        past_kv: tuple[torch.Tensor, torch.Tensor] | None = None,
         use_cache: bool = False,
-    ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
         # Residual connection with pre-norm
         attn_out, new_kv = self.attn(self.attn_norm(x), past_kv=past_kv, use_cache=use_cache)
         x = x + attn_out
@@ -151,11 +156,13 @@ class TransformerBlock(nn.Module):
 
 class WorldModel(nn.Module):
     """
-    Mundus 0.1 (230M) Parameter Transformer World Model.
+    Mundus 0.1 Transformer World Model.
     Models environment dynamics: P(Next Tokens, Reward, Done | History, Actions)
     """
-    def __init__(self, config: WorldModelConfig = WorldModelConfig()):
+
+    def __init__(self, config: WorldModelConfig | None = None):
         super().__init__()
+        config = config or WorldModelConfig()
         self.config = config
 
         # Embeddings:
@@ -164,7 +171,6 @@ class WorldModel(nn.Module):
         self.total_vocab = config.vocab_size + config.num_actions
         self.token_embedding = nn.Embedding(self.total_vocab, config.d_model)
 
-        # 18 Layers of Transformer Blocks
         self.layers = nn.ModuleList([TransformerBlock(config) for _ in range(config.n_layers)])
         self.final_norm = RMSNorm(config.d_model, eps=config.norm_eps)
 
@@ -204,9 +210,9 @@ class WorldModel(nn.Module):
     def forward(
         self,
         token_seq: torch.Tensor,
-        past_kvs: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None,
+        past_kvs: list[tuple[torch.Tensor, torch.Tensor]] | None = None,
         use_cache: bool = False,
-    ) -> Dict[str, torch.Tensor]:
+    ) -> dict[str, torch.Tensor | list[tuple[torch.Tensor, torch.Tensor]] | None]:
         """
         Forward pass through the dynamics model.
         Args:
@@ -249,7 +255,7 @@ class WorldModel(nn.Module):
         target_rewards: torch.Tensor,
         target_dones: torch.Tensor,
         visual_mask: torch.Tensor,
-    ) -> Dict[str, torch.Tensor]:
+    ) -> dict[str, torch.Tensor]:
         """
         Computes multi-task loss for dynamics, reward, and episode termination.
         """
@@ -287,10 +293,10 @@ class WorldModel(nn.Module):
     def imagine_step(
         self,
         input_token: torch.Tensor,
-        past_kvs: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None,
+        past_kvs: list[tuple[torch.Tensor, torch.Tensor]] | None = None,
         temperature: float = 1.0,
         top_k: int = 50,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, List[Tuple[torch.Tensor, torch.Tensor]]]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[tuple[torch.Tensor, torch.Tensor]]]:
         """
         Single auto-regressive step with KV caching.
         Returns sampled next token, predicted reward, predicted done, and new KV cache.
@@ -310,14 +316,16 @@ class WorldModel(nn.Module):
 
         return next_token, reward, done_prob, out["new_kvs"]
 
-    def count_parameters(self) -> Dict[str, int]:
+    def count_parameters(self) -> dict[str, int]:
         """Returns parameter count breakdown."""
         total = sum(p.numel() for p in self.parameters())
         layers = sum(p.numel() for layer in self.layers for p in layer.parameters())
         embed = self.token_embedding.weight.numel()
-        heads = sum(p.numel() for p in self.lm_head.parameters()) + \
-                sum(p.numel() for p in self.reward_head.parameters()) + \
-                sum(p.numel() for p in self.done_head.parameters())
+        heads = (
+            sum(p.numel() for p in self.lm_head.parameters())
+            + sum(p.numel() for p in self.reward_head.parameters())
+            + sum(p.numel() for p in self.done_head.parameters())
+        )
         return {
             "total": total,
             "transformer_layers": layers,

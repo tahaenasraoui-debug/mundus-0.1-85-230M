@@ -6,10 +6,11 @@ Requires zero external ROMs or gym dependencies.
 
 import math
 import random
-from typing import List, Tuple, Dict
+
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+
 from config import WorldModelConfig
 
 
@@ -24,6 +25,7 @@ class PhysicsGameEnv:
       - Paddle catch yields +1 reward
       - Missed ball yields -1 reward and episode termination (done=True)
     """
+
     def __init__(self, width: int = 64, height: int = 64):
         self.width = width
         self.height = height
@@ -40,7 +42,7 @@ class PhysicsGameEnv:
         speed = 2.0
         self.ball_vx = speed * math.cos(angle)
         self.ball_vy = speed * math.sin(angle)
-        self.score = 0
+        self.score = 0.0
         self.steps = 0
         self.max_steps = 100
 
@@ -50,11 +52,11 @@ class PhysicsGameEnv:
             for col in range(6):
                 bx = 6 + col * 9
                 by = 10 + row * 6
-                self.bricks.append([bx, by, 7, 4, True]) # x, y, w, h, alive
+                self.bricks.append([bx, by, 7, 4, True])  # x, y, w, h, alive
 
         return self.render()
 
-    def step(self, action: int) -> Tuple[np.ndarray, float, bool]:
+    def step(self, action: int) -> tuple[np.ndarray, float, bool]:
         """
         Actions: 0 = Stay, 1 = Left, 2 = Right
         """
@@ -98,7 +100,7 @@ class PhysicsGameEnv:
 
         # Brick collisions
         for brick in self.bricks:
-            if brick[4]: # alive
+            if brick[4]:  # alive
                 bx, by, bw, bh = brick[:4]
                 if bx <= self.ball_x <= bx + bw and by <= self.ball_y <= by + bh:
                     brick[4] = False
@@ -114,6 +116,7 @@ class PhysicsGameEnv:
         if self.steps >= self.max_steps:
             done = True
 
+        self.score += reward
         obs = self.render()
         return obs, reward, done
 
@@ -137,8 +140,8 @@ class PhysicsGameEnv:
         img[py : py + self.paddle_h, px1:px2] = [0.2, 0.85, 0.95]
 
         # Draw Ball (Bright White)
-        bx = int(round(self.ball_x))
-        by = int(round(self.ball_y))
+        bx = round(self.ball_x)
+        by = round(self.ball_y)
         r = int(self.ball_radius)
         for dy in range(-r, r + 1):
             for dx in range(-r, r + 1):
@@ -150,7 +153,7 @@ class PhysicsGameEnv:
         return img
 
 
-def collect_trajectories(num_episodes: int = 50, episode_length: int = 30) -> List[Dict[str, np.ndarray]]:
+def collect_trajectories(num_episodes: int = 50, episode_length: int = 30) -> list[dict[str, np.ndarray]]:
     """
     Simulates environment and records trajectories of (frames, actions, rewards, dones).
     """
@@ -167,15 +170,15 @@ def collect_trajectories(num_episodes: int = 50, episode_length: int = 30) -> Li
         frames.append(obs)
 
         # Heuristic policy with random exploration
-        for t in range(episode_length):
+        for _ in range(episode_length):
             # 80% tracker, 20% random exploration
             if random.random() < 0.8:
                 if env.ball_x < env.paddle_x - 1:
-                    action = 1 # Left
+                    action = 1  # Left
                 elif env.ball_x > env.paddle_x + 1:
-                    action = 2 # Right
+                    action = 2  # Right
                 else:
-                    action = 0 # Stay
+                    action = 0  # Stay
             else:
                 action = random.choice([0, 1, 2])
 
@@ -188,28 +191,31 @@ def collect_trajectories(num_episodes: int = 50, episode_length: int = 30) -> Li
             if done:
                 break
 
-        dataset.append({
-            "frames": np.stack(frames, axis=0),        # (T+1, 64, 64, 3)
-            "actions": np.array(actions, dtype=np.int64), # (T,)
-            "rewards": np.array(rewards, dtype=np.float32), # (T,)
-            "dones": np.array(dones, dtype=np.float32), # (T,)
-        })
+        dataset.append(
+            {
+                "frames": np.stack(frames, axis=0),  # (T+1, 64, 64, 3)
+                "actions": np.array(actions, dtype=np.int64),  # (T,)
+                "rewards": np.array(rewards, dtype=np.float32),  # (T,)
+                "dones": np.array(dones, dtype=np.float32),  # (T,)
+            }
+        )
 
     return dataset
 
 
 class WorldModelDataset(Dataset):
     """
-    Prepares interleaved token sequences for the 230M World Model:
+    Prepares interleaved token sequences for the World Model:
     Sequence format per transition:
         [Visual_Tokens_t, Action_Token_t, Visual_Tokens_{t+1}, ...]
     """
+
     def __init__(
         self,
-        episodes: List[Dict[str, np.ndarray]],
+        episodes: list[dict[str, np.ndarray]],
         tokenizer,
         config: WorldModelConfig,
-        seq_frames: int = 4, # number of transitions per slice
+        seq_frames: int = 4,  # number of transitions per slice
         device: str = "cpu",
     ):
         self.config = config
@@ -221,9 +227,9 @@ class WorldModelDataset(Dataset):
         tokenizer.eval()
         with torch.no_grad():
             for ep in episodes:
-                frames_np = ep["frames"] # (T+1, 64, 64, 3)
+                frames_np = ep["frames"]  # (T+1, 64, 64, 3)
                 frames_t = torch.from_numpy(frames_np).permute(0, 3, 1, 2).float().to(device)
-                tokens = tokenizer.encode(frames_t).cpu() # (T+1, tokens_per_frame)
+                tokens = tokenizer.encode(frames_t).cpu()  # (T+1, tokens_per_frame)
 
                 actions = ep["actions"]
                 rewards = ep["rewards"]
@@ -231,29 +237,31 @@ class WorldModelDataset(Dataset):
                 T = len(actions)
 
                 # Slice into sub-sequences of length seq_frames
-                for i in range(0, max(1, T - seq_frames + 1)):
-                    sub_tokens = tokens[i : i + seq_frames + 1] # (seq_frames + 1, K)
-                    sub_actions = actions[i : i + seq_frames]    # (seq_frames,)
-                    sub_rewards = rewards[i : i + seq_frames]    # (seq_frames,)
-                    sub_dones = dones[i : i + seq_frames]        # (seq_frames,)
+                for i in range(max(1, T - seq_frames + 1)):
+                    sub_tokens = tokens[i : i + seq_frames + 1]  # (seq_frames + 1, K)
+                    sub_actions = actions[i : i + seq_frames]  # (seq_frames,)
+                    sub_rewards = rewards[i : i + seq_frames]  # (seq_frames,)
+                    sub_dones = dones[i : i + seq_frames]  # (seq_frames,)
 
                     if len(sub_actions) == seq_frames:
-                        self.samples.append({
-                            "tokens": sub_tokens,
-                            "actions": torch.from_numpy(sub_actions),
-                            "rewards": torch.from_numpy(sub_rewards),
-                            "dones": torch.from_numpy(sub_dones),
-                        })
+                        self.samples.append(
+                            {
+                                "tokens": sub_tokens,
+                                "actions": torch.from_numpy(sub_actions),
+                                "rewards": torch.from_numpy(sub_rewards),
+                                "dones": torch.from_numpy(sub_dones),
+                            }
+                        )
 
     def __len__(self) -> int:
         return len(self.samples)
 
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         sample = self.samples[idx]
-        tokens = sample["tokens"]     # (F+1, K) where K = 64
-        actions = sample["actions"]   # (F,)
-        rewards = sample["rewards"]   # (F,)
-        dones = sample["dones"]       # (F,)
+        tokens = sample["tokens"]  # (F+1, K) where K = 64
+        actions = sample["actions"]  # (F,)
+        rewards = sample["rewards"]  # (F,)
+        dones = sample["dones"]  # (F,)
 
         K = self.config.tokens_per_frame
         F = len(actions)
@@ -273,7 +281,7 @@ class WorldModelDataset(Dataset):
             target_tokens.append(tokens[0, k].item())
             target_rewards.append(0.0)
             target_dones.append(0.0)
-            visual_mask.append(0.0) # Do not supervise prompt frame
+            visual_mask.append(0.0)  # Do not supervise prompt frame
 
         # For each transition:
         for t in range(F):

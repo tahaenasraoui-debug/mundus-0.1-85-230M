@@ -1,15 +1,13 @@
 """
-Smoke test and parameter verification script for the 230M World Model.
+Smoke test and parameter verification script for the Mundus 0.1 (230M) World Model.
 Validates parameter counts, forward/backward passes, VQ-VAE encode/decode, and KV-cache.
 """
 
-import sys
-import os
 import time
-import torch
-import torch.nn.functional as F
 
-from config import TokenizerConfig, WorldModelConfig, get_config_230m
+import torch
+
+from config import TokenizerConfig, get_config_230m
 from tokenizer import VQVAE
 from world_model import WorldModel
 
@@ -32,12 +30,13 @@ def verify_all():
     wm_params = world_model.count_parameters()
     tok_params = sum(p.numel() for p in tokenizer.parameters())
 
-    print(f"  • World Model Total Parameters: {wm_params['total']:,} ({wm_params['total']/1e6:.2f}M)")
-    print(f"    - 18x SwiGLU Transformer Blocks: {wm_params['transformer_layers']:,}")
+    print(f"  • World Model Total Parameters: {wm_params['total']:,} ({wm_params['total'] / 1e6:.2f}M)")
+    print(f"    - {wm_config.n_layers}x SwiGLU Transformer Blocks: {wm_params['transformer_layers']:,}")
     print(f"    - Embeddings (Vocab + Actions):  {wm_params['embeddings']:,}")
     print(f"    - Multi-Task Prediction Heads:   {wm_params['prediction_heads']:,}")
-    print(f"  • VQ-VAE Tokenizer Parameters:     {tok_params:,} ({tok_params/1e6:.2f}M)")
-    print(f"  • Combined System Parameters:      {(wm_params['total'] + tok_params):,} ({(wm_params['total'] + tok_params)/1e6:.2f}M)")
+    print(f"  • VQ-VAE Tokenizer Parameters:     {tok_params:,} ({tok_params / 1e6:.2f}M)")
+    combined = wm_params["total"] + tok_params
+    print(f"  • Combined System Parameters:      {combined:,} ({combined / 1e6:.2f}M)")
 
     assert 225_000_000 <= wm_params["total"] <= 240_000_000, f"Expected ~230M params, got {wm_params['total']}"
     print("  --> Parameter count test PASSED (Target ~230M confirmed)!")
@@ -48,10 +47,10 @@ def verify_all():
     tokens = tokenizer.encode(dummy_frame)
     assert tokens.shape == (2, 64), f"Expected tokens shape (2, 64), got {tokens.shape}"
     assert (tokens >= 0).all() and (tokens < tok_config.vocab_size).all()
-    
+
     reconstruction = tokenizer.decode_tokens(tokens)
     assert reconstruction.shape == (2, 3, 64, 64), f"Expected recon shape (2, 3, 64, 64), got {reconstruction.shape}"
-    print(f"  --> Tokenizer successfully compressed (2, 3, 64, 64) into (2, 64) tokens and reconstructed back. PASSED!")
+    print("  --> Tokenizer successfully compressed (2, 3, 64, 64) into (2, 64) tokens and reconstructed back. PASSED!")
 
     # 3. World Model Forward & Loss Test
     print("\n[3/5] Testing 230M Transformer Forward Pass & Multi-Task Loss...")
@@ -104,7 +103,7 @@ def verify_all():
     assert rew.numel() == 1
     assert done.numel() == 1
     assert len(new_kvs) == wm_config.n_layers
-    assert new_kvs[0][0].shape[2] == 11 # 10 prompt tokens + 1 step token
+    assert new_kvs[0][0].shape[2] == 11  # 10 prompt tokens + 1 step token
     print(f"  • KV-cache length after 1 step: {new_kvs[0][0].shape[2]} tokens")
     print("  --> KV-cache autoregressive step PASSED!")
 

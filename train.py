@@ -1,10 +1,25 @@
 """
-Training pipeline for Mundus 0.1 (230M) World Model and VQ-VAE Tokenizer.
+Training pipeline for Mundus 0.1 (85M / 130M / 230M) World Model and VQ-VAE Tokenizer.
 Includes Stage 1 (Visual Codebook Training) and Stage 2 (Latent Dynamics Training).
 """
 
+import argparse
+import math
 import os
 import sys
+import time
+from pathlib import Path
+
+import numpy as np
+import torch
+import torch.optim as optim
+from torch.utils.data import DataLoader
+
+from config import DEFAULT_CHECKPOINT_DIR, TokenizerConfig, TrainConfig, get_config
+from dataset import WorldModelDataset, collect_trajectories
+from doom_env import collect_doom_trajectories
+from tokenizer import VQVAE
+from world_model import WorldModel
 
 # Ensure immediate line-buffered output when logging to files
 if hasattr(sys.stdout, "reconfigure"):
@@ -12,18 +27,10 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(line_buffering=True)
 
-import time
-import argparse
-import math
-import torch
-import torch.optim as optim
-from torch.utils.data import DataLoader
 
-from config import TokenizerConfig, WorldModelConfig, TrainConfig, get_config_230m
-from tokenizer import VQVAE
-from world_model import WorldModel
-from dataset import PhysicsGameEnv, collect_trajectories, WorldModelDataset
-from doom_env import DoomMiniEnv, collect_doom_trajectories
+def _model_slug(model_name: str) -> str:
+    """Normalizes a model name like 'Mundus-0.1-85M' to 'mundus_0.1_85m'."""
+    return model_name.strip().lower().replace("-", "_").replace(" ", "_")
 
 
 def train_tokenizer(
@@ -33,20 +40,18 @@ def train_tokenizer(
     batch_size: int = 16,
     lr: float = 1e-3,
     device: str = "cpu",
-):
+    checkpoint_dir: str | Path | None = None,
+) -> Path:
     """
-    Stage 1: Train VQ-VAE codebook on visual frames.
+    Stage 1: Train VQ-VAE codebook on visual frames and save checkpoints/tokenizer.pt.
     """
     print("\n==========================================")
     print("STAGE 1: Training VQ-VAE Visual Tokenizer")
     print("==========================================")
 
     # Gather all frames from episodes into a flat tensor
-    all_frames = []
-    for ep in episodes:
-        for f in ep["frames"]:
-            all_frames.append(f)
-    frames_tensor = torch.from_numpy(np.stack(all_frames)).permute(0, 3, 1, 2).float() # (N, 3, 64, 64)
+    all_frames = [f for ep in episodes for f in ep["frames"]]
+    frames_tensor = torch.from_numpy(np.stack(all_frames)).permute(0, 3, 1, 2).float()  # (N, 3, 64, 64)
 
     dataset = torch.utils.data.TensorDataset(frames_tensor)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
@@ -70,7 +75,13 @@ def train_tokenizer(
         dt = time.time() - t0
         print(f"Epoch {epoch + 1}/{epochs} | VQ-VAE Loss: {avg_loss:.5f} | Time: {dt:.1f}s")
 
+    ckpt_dir = Path(checkpoint_dir) if checkpoint_dir is not None else DEFAULT_CHECKPOINT_DIR
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    save_path = ckpt_dir / "tokenizer.pt"
+    torch.save(tokenizer.state_dict(), save_path)
+    print(f"--> Saved VQ-VAE visual tokenizer to {save_path}")
     print("Stage 1 complete! Visual tokenizer is ready.\n")
+    return save_path
 
 
 def train_world_model(
@@ -80,14 +91,17 @@ def train_world_model(
     device: str = "cpu",
 ):
     """
-    Stage 2: Train the 230M Transformer on latent trajectory rollouts.
+    Stage 2: Train the Transformer World Model on latent trajectory rollouts.
     """
+    model_name = world_model.config.model_name
+    model_slug = _model_slug(model_name)
+
     print("==========================================")
-    print(f"STAGE 2: Training {world_model.config.model_name}")
+    print(f"STAGE 2: Training {model_name}")
     print("==========================================")
     params_breakdown = world_model.count_parameters()
-    print(f"Total Parameters: {params_breakdown['total']:,} ({params_breakdown['total']/1e6:.2f}M)")
-    print(f"  - Transformer Layers (18x): {params_breakdown['transformer_layers']:,}")
+    print(f"Total Parameters: {params_breakdown['total']:,} ({params_breakdown['total'] / 1e6:.2f}M)")
+    print(f"  - Transformer Layers ({world_model.config.n_layers}x): {params_breakdown['transformer_layers']:,}")
     print(f"  - Vocabulary & Action Embeddings: {params_breakdown['embeddings']:,}")
     print(f"  - Multi-Task Prediction Heads: {params_breakdown['prediction_heads']:,}")
     print("==========================================\n")
@@ -116,7 +130,9 @@ def train_world_model(
     running_don_loss = 0.0
 
     t_start = time.time()
-    os.makedirs(train_cfg.checkpoint_dir, exist_ok=True)
+    ckpt_dir = Path(train_cfg.checkpoint_dir)
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    step_prefix = f"{model_slug}_step_"
 
     while step < train_cfg.max_steps:
         for batch in loader:
@@ -162,7 +178,7 @@ def train_world_model(
                 steps_per_sec = step / max(1.0, elapsed)
 
                 print(
-                    f"Step {step:05d}/{train_cfg.max_steps:05d} | "
+                    f"[{model_name}] Step {step:05d}/{train_cfg.max_steps:05d} | "
                     f"Loss: {avg_l:.4f} (Tok: {avg_tok:.4f}, Rew: {avg_rew:.4f}, Done: {avg_don:.4f}) | "
                     f"LR: {cur_lr:.2e} | "
                     f"Speed: {steps_per_sec:.2f} steps/s"
@@ -175,11 +191,11 @@ def train_world_model(
 
             # Smart rolling checkpoint saving (protects disk space on long 45k runs)
             if step % train_cfg.save_interval == 0 or step == train_cfg.max_steps:
-                latest_ckpt_path = os.path.join(train_cfg.checkpoint_dir, "mundus_0.1_latest.pt")
-                step_ckpt_path = os.path.join(train_cfg.checkpoint_dir, f"mundus_0.1_step_{step}.pt")
+                latest_ckpt_path = ckpt_dir / f"{model_slug}_latest.pt"
+                step_ckpt_path = ckpt_dir / f"{step_prefix}{step}.pt"
 
                 checkpoint_data = {
-                    "model_name": "Mundus-0.1-230M",
+                    "model_name": model_name,
                     "step": step,
                     "world_model": world_model.state_dict(),
                     "config": world_model.config,
@@ -193,15 +209,15 @@ def train_world_model(
                     torch.save(checkpoint_data, step_ckpt_path)
                     print(f"--> Saved milestone checkpoint to {step_ckpt_path}")
 
-                    # Prune older step checkpoints to keep disk usage < 1.5 GB
+                    # Prune older step checkpoints to keep disk usage bounded
                     existing_ckpts = sorted(
-                        [f for f in os.listdir(train_cfg.checkpoint_dir) if f.startswith("mundus_0.1_step_") and f.endswith(".pt")],
-                        key=lambda x: int(x.split("_")[-1].replace(".pt", ""))
+                        [f for f in os.listdir(ckpt_dir) if f.startswith(step_prefix) and f.endswith(".pt")],
+                        key=lambda x: int(x.removeprefix(step_prefix).removesuffix(".pt")),
                     )
                     if len(existing_ckpts) > 2:
                         for old in existing_ckpts[:-2]:
                             try:
-                                os.remove(os.path.join(train_cfg.checkpoint_dir, old))
+                                (ckpt_dir / old).unlink()
                             except OSError:
                                 pass
                 else:
@@ -213,35 +229,57 @@ def train_world_model(
 
 def main():
     parser = argparse.ArgumentParser(description="Train Mundus World Model")
-    parser.add_argument("--model", type=str, default="85m", choices=["85m", "130m", "230m"], help="Model preset scale ('85m', '130m', '230m')")
-    parser.add_argument("--env", type=str, default="doom", choices=["doom", "arcade"], help="Game environment ('doom' 3D raycaster or 'arcade' 2D breakout)")
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="85m",
+        choices=["85m", "130m", "230m"],
+        help="Model preset scale ('85m', '130m', '230m')",
+    )
+    parser.add_argument(
+        "--env",
+        type=str,
+        default="doom",
+        choices=["doom", "arcade"],
+        help="Game environment ('doom' 3D raycaster or 'arcade' 2D breakout)",
+    )
     parser.add_argument("--episodes", type=int, default=30, help="Number of episodes to record")
     parser.add_argument("--steps", type=int, default=1000, help="Training steps")
     parser.add_argument("--batch_size", type=int, default=2, help="Batch size")
     parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device to use ('cpu' or 'cuda')")
+    parser.add_argument("--tokenizer_epochs", type=int, default=4, help="Stage 1 VQ-VAE tokenizer epochs")
+    parser.add_argument(
+        "--checkpoint_dir",
+        type=str,
+        default=str(DEFAULT_CHECKPOINT_DIR),
+        help="Directory to save tokenizer and world model checkpoints",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda" if torch.cuda.is_available() else "cpu",
+        help="Device to use ('cpu' or 'cuda')",
+    )
     args = parser.parse_args()
 
-    import numpy as np
-
     device = args.device
+    wm_cfg = get_config(args.model)
     if device == "cpu":
         torch.set_num_threads(8)
-        print(f"Running Mundus ({args.model.upper()}) on 8 CPU cores...")
+        print(f"Running {wm_cfg.model_name} on 8 CPU cores...")
     else:
-        print(f"Running Mundus ({args.model.upper()}) on GPU: {torch.cuda.get_device_name(0)}...")
+        gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else device
+        print(f"Running {wm_cfg.model_name} on GPU: {gpu_name}...")
 
     print("Initializing environment and models...")
     tok_cfg = TokenizerConfig()
-    
-    from config import get_config_85m, get_config_130m, get_config_230m
-    if args.model == "85m":
-        wm_cfg = get_config_85m()
-    elif args.model == "130m":
-        wm_cfg = get_config_130m()
-    else:
-        wm_cfg = get_config_230m()
-    train_cfg = TrainConfig(batch_size=args.batch_size, lr=args.lr, max_steps=args.steps)
+    train_cfg = TrainConfig(
+        batch_size=args.batch_size,
+        lr=args.lr,
+        max_steps=args.steps,
+        device=device,
+        checkpoint_dir=args.checkpoint_dir,
+    )
 
     tokenizer = VQVAE(tok_cfg).to(device)
     world_model = WorldModel(wm_cfg).to(device)
@@ -253,8 +291,15 @@ def main():
         print(f"Collecting {args.episodes} training trajectories from PhysicsGameEnv (Arcade 2D)...")
         episodes = collect_trajectories(num_episodes=args.episodes, episode_length=35)
 
-    # Stage 1: Quick tokenizer training
-    train_tokenizer(tokenizer, episodes, epochs=4, batch_size=16, device=device)
+    # Stage 1: Train and save VQ-VAE visual tokenizer
+    train_tokenizer(
+        tokenizer,
+        episodes,
+        epochs=args.tokenizer_epochs,
+        batch_size=16,
+        device=device,
+        checkpoint_dir=train_cfg.checkpoint_dir,
+    )
 
     # Stage 2: Tokenize trajectories and train dynamics
     print("Pre-tokenizing trajectories for fast dynamics training...")
@@ -265,5 +310,4 @@ def main():
 
 
 if __name__ == "__main__":
-    import numpy as np
     main()

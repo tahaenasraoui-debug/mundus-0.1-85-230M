@@ -6,7 +6,8 @@ Zero external ROM or C++ dependencies: 100% native Python & NumPy.
 
 import math
 import random
-from typing import Tuple, List, Dict
+from pathlib import Path
+
 import numpy as np
 from PIL import Image
 
@@ -20,7 +21,7 @@ class DoomMiniEnv:
       - Textured brick mortar patterns for walls
       - 3D Billboard enemy demon sprites with glowing eyes & hit reactions
       - First-person double-barrel shotgun with bob, muzzle flash, and crosshair
-      - Hitscan shooting mechanics with blood impact rewards
+      - Hitscan shooting mechanics with wall occlusion and blood impact rewards
 
     Actions:
       0 = Idle
@@ -30,26 +31,30 @@ class DoomMiniEnv:
       4 = Move Backward
       5 = Fire Weapon
     """
+
     def __init__(self, width: int = 64, height: int = 64):
         self.width = width
         self.height = height
         self.fov = math.pi / 2.7  # ~66 degrees field of view
 
         # 12x12 Dungeon Map (1 = Stone Wall, 2 = Rust Tech Wall, 3 = Crimson Wall)
-        self.map_grid = np.array([
-            [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
-            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
-            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
-            [1, 0, 2, 2, 0, 0, 0, 0, 3, 3, 0, 1],
-            [1, 0, 2, 0, 0, 0, 0, 0, 0, 3, 0, 1],
-            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
-            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
-            [1, 0, 3, 0, 0, 0, 0, 0, 0, 2, 0, 1],
-            [1, 0, 3, 3, 0, 0, 0, 0, 2, 2, 0, 1],
-            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
-            [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
-            [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
-        ], dtype=np.int32)
+        self.map_grid = np.array(
+            [
+                [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+                [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+                [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+                [1, 0, 2, 2, 0, 0, 0, 0, 3, 3, 0, 1],
+                [1, 0, 2, 0, 0, 0, 0, 0, 0, 3, 0, 1],
+                [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+                [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+                [1, 0, 3, 0, 0, 0, 0, 0, 0, 2, 0, 1],
+                [1, 0, 3, 3, 0, 0, 0, 0, 2, 2, 0, 1],
+                [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+                [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+                [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+            ],
+            dtype=np.int32,
+        )
 
         self.reset()
 
@@ -75,7 +80,97 @@ class DoomMiniEnv:
 
         return self.render()
 
-    def step(self, action: int) -> Tuple[np.ndarray, float, bool]:
+    def _is_walkable(self, x: float, y: float) -> bool:
+        """Returns True if (x, y) is inside map bounds and not a wall tile."""
+        map_h, map_w = self.map_grid.shape
+        ix = int(math.floor(x))
+        iy = int(math.floor(y))
+        return 0 <= ix < map_w and 0 <= iy < map_h and int(self.map_grid[iy, ix]) == 0
+
+    def _cast_ray(
+        self,
+        ray_dir_x: float,
+        ray_dir_y: float,
+        max_steps: int | None = None,
+    ) -> tuple[int, int, float, float]:
+        """
+        Casts a 2D DDA ray from (player_x, player_y) along (ray_dir_x, ray_dir_y).
+
+        Returns:
+            (hit_wall, side, dist, wall_x)
+            If no wall is struck within map bounds or max_steps, hit_wall is 0
+            and dist is float("inf").
+        """
+        if ray_dir_x == 0.0 and ray_dir_y == 0.0:
+            return 0, 0, float("inf"), 0.0
+
+        map_h, map_w = self.map_grid.shape
+        if max_steps is None:
+            max_steps = max(24, map_h + map_w + 4)
+
+        map_x = int(math.floor(self.player_x))
+        map_y = int(math.floor(self.player_y))
+
+        if ray_dir_x == 0.0:
+            delta_dist_x = float("inf")
+            step_x = 0
+            side_dist_x = float("inf")
+        elif ray_dir_x < 0.0:
+            delta_dist_x = abs(1.0 / ray_dir_x)
+            step_x = -1
+            side_dist_x = (self.player_x - map_x) * delta_dist_x
+        else:
+            delta_dist_x = abs(1.0 / ray_dir_x)
+            step_x = 1
+            side_dist_x = (map_x + 1.0 - self.player_x) * delta_dist_x
+
+        if ray_dir_y == 0.0:
+            delta_dist_y = float("inf")
+            step_y = 0
+            side_dist_y = float("inf")
+        elif ray_dir_y < 0.0:
+            delta_dist_y = abs(1.0 / ray_dir_y)
+            step_y = -1
+            side_dist_y = (self.player_y - map_y) * delta_dist_y
+        else:
+            delta_dist_y = abs(1.0 / ray_dir_y)
+            step_y = 1
+            side_dist_y = (map_y + 1.0 - self.player_y) * delta_dist_y
+
+        hit_wall = 0
+        side = 0
+        for _ in range(max_steps):
+            if side_dist_x < side_dist_y:
+                side_dist_x += delta_dist_x
+                map_x += step_x
+                side = 0
+            else:
+                side_dist_y += delta_dist_y
+                map_y += step_y
+                side = 1
+
+            if 0 <= map_x < map_w and 0 <= map_y < map_h:
+                cell = int(self.map_grid[map_y, map_x])
+                if cell > 0:
+                    hit_wall = cell
+                    break
+            else:
+                break
+
+        if hit_wall == 0:
+            return 0, 0, float("inf"), 0.0
+
+        if side == 0:
+            dist = side_dist_x - delta_dist_x
+            wall_x = self.player_y + dist * ray_dir_y
+        else:
+            dist = side_dist_y - delta_dist_y
+            wall_x = self.player_x + dist * ray_dir_x
+
+        wall_x -= math.floor(wall_x)
+        return hit_wall, side, dist, wall_x
+
+    def step(self, action: int) -> tuple[np.ndarray, float, bool]:
         """
         Takes discrete action and returns (obs, reward, done).
         Actions: 0=Stay, 1=Turn Left, 2=Turn Right, 3=Forward, 4=Backward, 5=Fire
@@ -101,12 +196,11 @@ class DoomMiniEnv:
         elif action == 3:  # Move Forward
             dx = math.cos(self.player_angle) * move_speed
             dy = math.sin(self.player_angle) * move_speed
-            # Collision check with margin
             nx = self.player_x + dx
             ny = self.player_y + dy
-            if 0 < nx < 11 and self.map_grid[int(self.player_y), int(nx + math.copysign(0.2, dx))] == 0:
+            if self._is_walkable(nx + math.copysign(0.2, dx), self.player_y):
                 self.player_x = nx
-            if 0 < ny < 11 and self.map_grid[int(ny + math.copysign(0.2, dy)), int(self.player_x)] == 0:
+            if self._is_walkable(self.player_x, ny + math.copysign(0.2, dy)):
                 self.player_y = ny
             self.bob_phase += 0.4
         elif action == 4:  # Move Backward
@@ -114,9 +208,9 @@ class DoomMiniEnv:
             dy = math.sin(self.player_angle) * move_speed * 0.7
             nx = self.player_x - dx
             ny = self.player_y - dy
-            if 0 < nx < 11 and self.map_grid[int(self.player_y), int(nx - math.copysign(0.2, dx))] == 0:
+            if self._is_walkable(nx - math.copysign(0.2, dx), self.player_y):
                 self.player_x = nx
-            if 0 < ny < 11 and self.map_grid[int(ny - math.copysign(0.2, dy)), int(self.player_x)] == 0:
+            if self._is_walkable(self.player_x, ny - math.copysign(0.2, dy)):
                 self.player_y = ny
             self.bob_phase += 0.3
         elif action == 5:  # Fire Weapon
@@ -143,18 +237,18 @@ class DoomMiniEnv:
             if e["alive"]:
                 alive_count += 1
                 dist = math.hypot(self.player_x - e["x"], self.player_y - e["y"])
-                if dist < 5.0:  # In sight
+                if 1e-6 < dist < 5.0:  # In sight
                     edx = (self.player_x - e["x"]) / dist * 0.08
                     edy = (self.player_y - e["y"]) / dist * 0.08
-                    if self.map_grid[int(e["y"]), int(e["x"] + edx)] == 0:
+                    if self._is_walkable(e["x"] + edx, e["y"]):
                         e["x"] += edx
-                    if self.map_grid[int(e["y"] + edy), int(e["x"])] == 0:
+                    if self._is_walkable(e["x"], e["y"] + edy):
                         e["y"] += edy
 
-                    # Attack if adjacent
-                    if dist < 0.9:
-                        self.player_hp -= 10
-                        reward -= 1.0
+                # Attack if adjacent
+                if dist < 0.9:
+                    self.player_hp -= 10
+                    reward -= 1.0
 
         if alive_count == 0:
             reward += 5.0
@@ -165,8 +259,8 @@ class DoomMiniEnv:
         obs = self.render()
         return obs, reward, done
 
-    def _check_hitscan(self) -> dict:
-        """Checks if crosshairs hit an enemy in line of sight."""
+    def _check_hitscan(self) -> dict | None:
+        """Checks if crosshairs hit an enemy with unobstructed line of sight (wall occlusion checked)."""
         closest_enemy = None
         min_dist = 8.0
         for e in self.enemies:
@@ -175,13 +269,25 @@ class DoomMiniEnv:
             dx = e["x"] - self.player_x
             dy = e["y"] - self.player_y
             dist = math.hypot(dx, dy)
-            angle_to_e = math.atan2(dy, dx) - self.player_angle
-            while angle_to_e > math.pi: angle_to_e -= 2 * math.pi
-            while angle_to_e < -math.pi: angle_to_e += 2 * math.pi
+            if dist >= min_dist:
+                continue
 
-            if abs(angle_to_e) < 0.25 and dist < min_dist:
-                min_dist = dist
-                closest_enemy = e
+            if dist > 1e-6:
+                angle_to_e = math.atan2(dy, dx) - self.player_angle
+                while angle_to_e > math.pi:
+                    angle_to_e -= 2 * math.pi
+                while angle_to_e < -math.pi:
+                    angle_to_e += 2 * math.pi
+
+                if abs(angle_to_e) >= 0.25:
+                    continue
+
+                hit_wall, _, wall_dist, _ = self._cast_ray(dx / dist, dy / dist)
+                if hit_wall != 0 and wall_dist < dist:
+                    continue
+
+            min_dist = dist
+            closest_enemy = e
         return closest_enemy
 
     def render(self) -> np.ndarray:
@@ -211,60 +317,17 @@ class DoomMiniEnv:
         plane_y = dir_x * plane_scale
 
         # 3. DDA Raycast Walls
-        z_buffer = [100.0] * self.width
+        z_buffer = [float("inf")] * self.width
         for col in range(self.width):
             camera_x = 2.0 * col / self.width - 1.0
             ray_dir_x = dir_x + plane_x * camera_x
             ray_dir_y = dir_y + plane_y * camera_x
 
-            map_x = int(self.player_x)
-            map_y = int(self.player_y)
+            hit_wall, side, raw_dist, wall_x = self._cast_ray(ray_dir_x, ray_dir_y)
+            if hit_wall == 0:
+                continue
 
-            delta_dist_x = 1e30 if ray_dir_x == 0 else abs(1.0 / ray_dir_x)
-            delta_dist_y = 1e30 if ray_dir_y == 0 else abs(1.0 / ray_dir_y)
-
-            if ray_dir_x < 0:
-                step_x = -1
-                side_dist_x = (self.player_x - map_x) * delta_dist_x
-            else:
-                step_x = 1
-                side_dist_x = (map_x + 1.0 - self.player_x) * delta_dist_x
-
-            if ray_dir_y < 0:
-                step_y = -1
-                side_dist_y = (self.player_y - map_y) * delta_dist_y
-            else:
-                step_y = 1
-                side_dist_y = (map_y + 1.0 - self.player_y) * delta_dist_y
-
-            hit = 0
-            side = 0
-            for _ in range(24):
-                if side_dist_x < side_dist_y:
-                    side_dist_x += delta_dist_x
-                    map_x += step_x
-                    side = 0
-                else:
-                    side_dist_y += delta_dist_y
-                    map_y += step_y
-                    side = 1
-
-                if 0 <= map_x < 12 and 0 <= map_y < 12:
-                    if self.map_grid[map_y, map_x] > 0:
-                        hit = self.map_grid[map_y, map_x]
-                        break
-                else:
-                    hit = 1
-                    break
-
-            if side == 0:
-                perp_wall_dist = max(0.1, side_dist_x - delta_dist_x)
-                wall_x = self.player_y + perp_wall_dist * ray_dir_y
-            else:
-                perp_wall_dist = max(0.1, side_dist_y - delta_dist_y)
-                wall_x = self.player_x + perp_wall_dist * ray_dir_x
-
-            wall_x -= math.floor(wall_x)
+            perp_wall_dist = max(0.1, raw_dist)
             z_buffer[col] = perp_wall_dist
 
             wall_h = int(min(self.height, self.height / perp_wall_dist))
@@ -278,11 +341,11 @@ class DoomMiniEnv:
 
             # Mortar column lines
             tex_u = int(wall_x * 8)
-            is_mortar_x = (tex_u == 0 or tex_u == 7)
+            is_mortar_x = tex_u == 0 or tex_u == 7
 
-            if hit == 1:
+            if hit_wall == 1:
                 base_color = np.array([0.45, 0.50, 0.60])  # Slate Stone
-            elif hit == 2:
+            elif hit_wall == 2:
                 base_color = np.array([0.70, 0.40, 0.15])  # Rust Tech
             else:
                 base_color = np.array([0.75, 0.15, 0.15])  # Crimson Pillar
@@ -349,7 +412,7 @@ class DoomMiniEnv:
             flash_y = max(0, wy - 6)
             for fx in range(wx - flash_w, wx + flash_w):
                 if 0 <= fx < self.width:
-                    frame[flash_y : wy, fx] = [1.0, 0.85, 0.2]
+                    frame[flash_y:wy, fx] = [1.0, 0.85, 0.2]
             frame = np.clip(frame * 1.35, 0.0, 1.0)
 
         # 7. Crosshairs
@@ -361,7 +424,7 @@ class DoomMiniEnv:
         return frame.astype(np.float32)
 
 
-def collect_doom_trajectories(num_episodes: int = 50, episode_length: int = 35) -> List[Dict[str, np.ndarray]]:
+def collect_doom_trajectories(num_episodes: int = 50, episode_length: int = 35) -> list[dict[str, np.ndarray]]:
     """
     Simulates autonomous Doom explorer agents and records trajectories.
     """
@@ -401,12 +464,14 @@ def collect_doom_trajectories(num_episodes: int = 50, episode_length: int = 35) 
             if done:
                 break
 
-        dataset.append({
-            "frames": np.stack(frames, axis=0),
-            "actions": np.array(actions, dtype=np.int64),
-            "rewards": np.array(rewards, dtype=np.float32),
-            "dones": np.array(dones, dtype=np.float32),
-        })
+        dataset.append(
+            {
+                "frames": np.stack(frames, axis=0),
+                "actions": np.array(actions, dtype=np.int64),
+                "rewards": np.array(rewards, dtype=np.float32),
+                "dones": np.array(dones, dtype=np.float32),
+            }
+        )
 
     return dataset
 
@@ -418,9 +483,9 @@ if __name__ == "__main__":
     print("Initial frame shape:", frame.shape)
 
     img = (np.clip(frame, 0.0, 1.0) * 255.0).astype(np.uint8)
-    import os
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    os.makedirs(os.path.join(base_dir, "assets"), exist_ok=True)
-    Image.fromarray(img).resize((384, 384), Image.NEAREST).save(os.path.join(base_dir, "doom_preview.png"))
-    Image.fromarray(img).resize((384, 384), Image.NEAREST).save(os.path.join(base_dir, "assets", "doom_preview.png"))
+    base_dir = Path(__file__).resolve().parent
+    assets_dir = base_dir / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(img).resize((384, 384), Image.NEAREST).save(base_dir / "doom_preview.png")
+    Image.fromarray(img).resize((384, 384), Image.NEAREST).save(assets_dir / "doom_preview.png")
     print("Saved preview to doom_preview.png and assets/doom_preview.png")

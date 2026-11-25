@@ -6,6 +6,7 @@ Compresses continuous environment visual frames into discrete token IDs.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 from config import TokenizerConfig
 
 
@@ -30,6 +31,7 @@ class VectorQuantizer(nn.Module):
     Vector Quantizer with Straight-Through Estimator.
     Maps continuous vectors to discrete codebook indices.
     """
+
     def __init__(self, num_embeddings: int, embedding_dim: int, commitment_cost: float = 0.25):
         super().__init__()
         self.num_embeddings = num_embeddings
@@ -48,8 +50,8 @@ class VectorQuantizer(nn.Module):
 
         # Calculate L2 distances to all codebook embeddings: (x - e)^2 = x^2 + e^2 - 2xe
         distances = (
-            torch.sum(flat_input ** 2, dim=1, keepdim=True)
-            + torch.sum(self.embedding.weight ** 2, dim=1)
+            torch.sum(flat_input**2, dim=1, keepdim=True)
+            + torch.sum(self.embedding.weight**2, dim=1)
             - 2 * torch.matmul(flat_input, self.embedding.weight.t())
         )
 
@@ -85,17 +87,19 @@ class VQVAE(nn.Module):
     """
     Visual Tokenizer that encodes 64x64 frames into an 8x8 grid of discrete tokens (64 tokens).
     """
-    def __init__(self, config: TokenizerConfig = TokenizerConfig()):
+
+    def __init__(self, config: TokenizerConfig | None = None):
         super().__init__()
+        config = config or TokenizerConfig()
         self.config = config
 
         # Encoder: 64x64 -> 32x32 -> 16x16 -> 8x8
         self.encoder = nn.Sequential(
             nn.Conv2d(config.in_channels, 64, kernel_size=4, stride=2, padding=1),  # 32x32
             nn.ReLU(inplace=False),
-            nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1),                 # 16x16
+            nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1),  # 16x16
             nn.ReLU(inplace=False),
-            nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1),                # 8x8
+            nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1),  # 8x8
             nn.ReLU(inplace=False),
             ResidualBlock(256),
             ResidualBlock(256),
@@ -114,28 +118,28 @@ class VQVAE(nn.Module):
             nn.Conv2d(config.latent_dim, 256, kernel_size=1),
             ResidualBlock(256),
             ResidualBlock(256),
-            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1),       # 16x16
+            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1),  # 16x16
             nn.ReLU(inplace=False),
-            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),        # 32x32
+            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),  # 32x32
             nn.ReLU(inplace=False),
-            nn.ConvTranspose2d(64, config.in_channels, kernel_size=4, stride=2, padding=1), # 64x64
+            nn.ConvTranspose2d(64, config.in_channels, kernel_size=4, stride=2, padding=1),  # 64x64
             nn.Sigmoid(),  # Images normalized to [0, 1]
         )
 
     def encode(self, x: torch.Tensor):
-        """Encodes frame (B, C, 64, 64) -> discrete token indices (B, 64)"""
+        """Encodes frame (B, C, 64, 64) -> discrete token indices (B, 64)."""
         z = self.encoder(x)
         _, _, tokens = self.quantizer(z)
         return tokens
 
     def decode_tokens(self, tokens: torch.Tensor) -> torch.Tensor:
-        """Decodes token indices (B, 64) -> reconstructed frames (B, C, 64, 64)"""
+        """Decodes token indices (B, 64) -> reconstructed frames (B, C, 64, 64)."""
         quantized = self.quantizer.indices_to_latents(tokens, h=8, w=8)
         reconstruction = self.decoder(quantized)
         return reconstruction
 
     def forward(self, x: torch.Tensor):
-        """Full autoencoder forward pass with reconstruction + quantization loss"""
+        """Full autoencoder forward pass with reconstruction + quantization loss."""
         z = self.encoder(x)
         quantized, vq_loss, tokens = self.quantizer(z)
         reconstruction = self.decoder(quantized)

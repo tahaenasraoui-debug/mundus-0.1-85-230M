@@ -3,6 +3,8 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
+.pytest_cache/
+.ruff_cache/
 
 # Virtual Environments
 mundus_env/
@@ -10,16 +12,21 @@ mundus_env/
 env/
 venv/
 
-# Large Model Weights (Upload to Hugging Face Hub, not GitHub git commits)
+# Large Model Weights & Checkpoints (Upload to Hugging Face Hub, not GitHub git commits)
+checkpoints/
 checkpoints/*.pt
 *.pt
 *.bin
 *.onnx
+*.safetensors
 
 # Logs & temp test outputs
 *.log
 test.gif
 test_rollout.gif
+mundus_imagination.gif
+doom_preview.png
+!assets/doom_preview.png
 
 # IDE / OS
 .DS_Store
