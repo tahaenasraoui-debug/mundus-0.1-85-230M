@@ -173,6 +173,7 @@ class WorldModel(nn.Module):
 
         self.layers = nn.ModuleList([TransformerBlock(config) for _ in range(config.n_layers)])
         self.final_norm = RMSNorm(config.d_model, eps=config.norm_eps)
+        self.gradient_checkpointing = False
 
         # Prediction Heads
         # 1. Next visual token logits (predicts over visual vocabulary 0..vocab_size-1)
@@ -207,6 +208,13 @@ class WorldModel(nn.Module):
         """Offset action IDs to the action subspace in the unified vocabulary."""
         return actions + self.config.vocab_size
 
+    def gradient_checkpointing_enable(self):
+        """Enables activation checkpointing to drastically reduce VRAM during training."""
+        self.gradient_checkpointing = True
+
+    def gradient_checkpointing_disable(self):
+        self.gradient_checkpointing = False
+
     def forward(
         self,
         token_seq: torch.Tensor,
@@ -229,11 +237,21 @@ class WorldModel(nn.Module):
         x = self.token_embedding(token_seq)
 
         new_kvs = [] if use_cache else None
+        use_ckpt = self.gradient_checkpointing and self.training and past_kvs is None and not use_cache
+
         for i, layer in enumerate(self.layers):
             layer_past_kv = past_kvs[i] if past_kvs is not None else None
-            x, new_kv = layer(x, past_kv=layer_past_kv, use_cache=use_cache)
-            if use_cache:
-                new_kvs.append(new_kv)
+            if use_ckpt:
+                def make_custom_forward(mod):
+                    def custom_forward(hidden):
+                        out, _ = mod(hidden, past_kv=None, use_cache=False)
+                        return out
+                    return custom_forward
+                x = torch.utils.checkpoint.checkpoint(make_custom_forward(layer), x, use_reentrant=False)
+            else:
+                x, new_kv = layer(x, past_kv=layer_past_kv, use_cache=use_cache)
+                if use_cache:
+                    new_kvs.append(new_kv)
 
         x = self.final_norm(x)
 

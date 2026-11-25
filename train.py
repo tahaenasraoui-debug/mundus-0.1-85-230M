@@ -10,6 +10,9 @@ import sys
 import time
 from pathlib import Path
 
+# Prevent CUDA memory fragmentation on large model allocations
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import numpy as np
 import torch
 import torch.optim as optim
@@ -92,6 +95,7 @@ def train_world_model(
     amp: bool = True,
     grad_accum_steps: int = 1,
     use_adam8bit: bool = False,
+    grad_checkpoint: bool = True,
 ):
     """
     Stage 2: Train the Transformer World Model on latent trajectory rollouts.
@@ -110,6 +114,20 @@ def train_world_model(
     print(f"  - Vocabulary & Action Embeddings: {params_breakdown['embeddings']:,}")
     print(f"  - Multi-Task Prediction Heads: {params_breakdown['prediction_heads']:,}")
     print("==========================================\n")
+
+    # Enable activation gradient checkpointing to save VRAM
+    if grad_checkpoint and hasattr(world_model, "gradient_checkpointing_enable"):
+        world_model.gradient_checkpointing_enable()
+        print("[Memory] Gradient Checkpointing ENABLED (saving activation VRAM)")
+
+    use_cuda = device.startswith("cuda")
+    amp_enabled = use_cuda and amp
+    amp_dtype = torch.bfloat16 if (use_cuda and torch.cuda.is_bf16_supported()) else torch.float16
+
+    # Cast model parameters to 16-bit / bfloat16 to cut weights & gradient memory by 50%
+    if use_cuda and amp_enabled:
+        world_model.to(dtype=amp_dtype)
+        print(f"[Memory] World Model cast to {amp_dtype} (50% parameter & gradient memory savings)")
 
     loader = DataLoader(dataset, batch_size=train_cfg.batch_size, shuffle=True)
 
@@ -139,13 +157,13 @@ def train_world_model(
             betas=(0.9, 0.95),
         )
 
-    use_cuda = device.startswith("cuda")
-    amp_enabled = use_cuda and amp
-    amp_dtype = torch.bfloat16 if (use_cuda and torch.cuda.is_bf16_supported()) else torch.float16
-    scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
+    # GradScaler is essential for float16 to prevent underflow, but bypassed for bfloat16
+    scaler_enabled = amp_enabled and (amp_dtype == torch.float16)
+    scaler = torch.amp.GradScaler("cuda", enabled=scaler_enabled)
 
     if amp_enabled:
-        print(f"[AMP] Mixed Precision enabled (dtype: {amp_dtype})")
+        status_scaler = "active" if scaler_enabled else "bypassed for native bfloat16"
+        print(f"[AMP] Mixed Precision enabled (dtype: {amp_dtype}, GradScaler: {status_scaler})")
     if grad_accum_steps > 1:
         print(f"[Grad Accum] Effective batch size: {train_cfg.batch_size * grad_accum_steps} (accum={grad_accum_steps})")
 
@@ -193,14 +211,22 @@ def train_world_model(
                 total_loss = losses["total_loss"]
                 loss_to_backprop = total_loss / grad_accum_steps
 
-            scaler.scale(loss_to_backprop).backward()
+            if scaler_enabled:
+                scaler.scale(loss_to_backprop).backward()
+            else:
+                loss_to_backprop.backward()
 
             if step % grad_accum_steps == 0:
-                if train_cfg.grad_clip > 0:
-                    scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(world_model.parameters(), train_cfg.grad_clip)
-                scaler.step(optimizer)
-                scaler.update()
+                if scaler_enabled:
+                    if train_cfg.grad_clip > 0:
+                        scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(world_model.parameters(), train_cfg.grad_clip)
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    if train_cfg.grad_clip > 0:
+                        torch.nn.utils.clip_grad_norm_(world_model.parameters(), train_cfg.grad_clip)
+                    optimizer.step()
                 optimizer.zero_grad()
 
             running_loss += total_loss.item()
@@ -292,6 +318,18 @@ def main():
     parser.add_argument("--amp", action="store_true", default=True, help="Use Mixed Precision (FP16/BF16)")
     parser.add_argument("--no_amp", action="store_false", dest="amp", help="Disable Mixed Precision")
     parser.add_argument("--adam8bit", action="store_true", help="Use 8-bit Adam via bitsandbytes (vital for 3B on 16GB GPUs)")
+    parser.add_argument(
+        "--grad_checkpoint",
+        action="store_true",
+        default=True,
+        help="Enable activation gradient checkpointing (saves massive VRAM for 3B)",
+    )
+    parser.add_argument(
+        "--no_grad_checkpoint",
+        action="store_false",
+        dest="grad_checkpoint",
+        help="Disable activation gradient checkpointing",
+    )
     parser.add_argument("--tokenizer_epochs", type=int, default=4, help="Stage 1 VQ-VAE tokenizer epochs")
     parser.add_argument(
         "--checkpoint_dir",
@@ -365,6 +403,10 @@ def main():
     dataset = WorldModelDataset(episodes, tokenizer, wm_cfg, seq_frames=4, device=device)
     print(f"Generated {len(dataset)} transition chunks for training.")
 
+    # Free memory from tokenizer training before starting dynamics
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     train_world_model(
         world_model,
         dataset,
@@ -373,6 +415,7 @@ def main():
         amp=args.amp,
         grad_accum_steps=args.grad_accum,
         use_adam8bit=args.adam8bit,
+        grad_checkpoint=args.grad_checkpoint,
     )
 
 
