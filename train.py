@@ -134,13 +134,22 @@ def train_world_model(
     if use_adam8bit:
         try:
             import bitsandbytes as bnb
-            optimizer = bnb.optim.AdamW8bit(
-                world_model.parameters(),
-                lr=train_cfg.lr,
-                weight_decay=train_cfg.weight_decay,
-                betas=(0.9, 0.95),
-            )
-            print("[Optimizer] Using 8-bit AdamW (bitsandbytes) for ultra-low VRAM!")
+            if hasattr(bnb.optim, "PagedAdamW8bit"):
+                optimizer = bnb.optim.PagedAdamW8bit(
+                    world_model.parameters(),
+                    lr=train_cfg.lr,
+                    weight_decay=train_cfg.weight_decay,
+                    betas=(0.9, 0.95),
+                )
+                print("[Optimizer] Using Paged 8-bit AdamW (PagedAdamW8bit) — pages states to host RAM (prevents OOM on 15GB T4 GPUs)!")
+            else:
+                optimizer = bnb.optim.AdamW8bit(
+                    world_model.parameters(),
+                    lr=train_cfg.lr,
+                    weight_decay=train_cfg.weight_decay,
+                    betas=(0.9, 0.95),
+                )
+                print("[Optimizer] Using 8-bit AdamW (bitsandbytes) for ultra-low VRAM!")
         except ImportError:
             print("[Optimizer] bitsandbytes not installed, falling back to standard AdamW.")
             optimizer = optim.AdamW(
