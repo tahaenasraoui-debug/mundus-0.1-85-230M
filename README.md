@@ -1,9 +1,9 @@
-# 🌌 Mundus 0.1: Autonomous Neural Game Engine
+# Mundus 0.1: Autonomous Neural Game Engine
 
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-blue?logo=python&logoColor=white)](https://python.org)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.5%2B-ee4c2c?logo=pytorch&logoColor=white)](https://pytorch.org)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![HuggingFace](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Mundus--0.1-yellow)](https://huggingface.co/Tahary/mundus-0.1-world-model)
+[![HuggingFace](https://img.shields.io/badge/Hugging%20Face-Mundus--0.1-yellow)](https://huggingface.co/Tahary/mundus-0.1-world-model)
 
 > *"Mundus"* — Latin for *World / Universe*.  
 > A high-capacity, two-stage **Causal Transformer World Model** engineered for latent dynamics simulation, interactive environment rollouts, and model-based RL.
@@ -16,11 +16,11 @@
 
 ---
 
-## 🎮 Supported Game Environments
+## Supported Game Environments
 
 Mundus includes 4 self-contained retro game simulators written in native NumPy (zero external ROM dependencies):
 
-1. **🔴 Doom 3D (`doom_env.py`) — First-Person Raycaster**:
+1. **Doom 3D (`doom_env.py`) — First-Person Raycaster**:
    - DDA 3D perspective projection with directional face lighting & atmospheric fog.
    - Procedural wall shaders: Gothic brick, Tech steel with hazard stripes, Demonic rune pillars.
    - 3D billboard demons with horns, glowing eyes, teeth, and death collapse animations.
@@ -28,25 +28,25 @@ Mundus includes 4 self-contained retro game simulators written in native NumPy (
    - Classic Doom status bar HUD with Doomguy face, health, and ammo counters.
    - **Controls**: `W` (Fwd), `S` (Back), `A` (Turn Left), `D` (Turn Right), `Space` (Fire Shotgun), `R` (Reset).
 
-2. **🟢 Mundus Platformer (`platformer_env.py`) — 2D Super Mario Physics**:
+2. **Mundus Platformer (`platformer_env.py`) — 2D Super Mario Physics**:
    - Continuous Newtonian jumping arcs, momentum, gravity ($g = 0.45$), and camera scrolling.
    - Terracotta bricks, glowing '?' mystery blocks, floating coins, and stomping Goombas.
    - **Controls**: `A` / `D` or `Left` / `Right` (Run), `Space` / `W` / `Up` (Jump), `S` (Crouch), `R` (Reset).
 
-3. **🗡️ Mundus Dungeon (`dungeon_env.py`) — Top-Down Zelda Action RPG**:
+3. **Mundus Dungeon (`dungeon_env.py`) — Top-Down Zelda Action RPG**:
    - Dynamic radial torchlight illumination cone with dark dungeon corners.
    - Skeletons and slimes, golden treasure chests with ruby gems.
    - Adventurer hero with tunic, shield, and silver sword attack sweeps.
    - **Controls**: `W` / `S` / `A` / `D` (Move Cardinal), `Space` (Sword Attack), `R` (Reset).
 
-4. **🏎️ Mundus Grand Prix (`racer_env.py`) — Top-Down High-Speed Circuit Racer**:
+4. **Mundus Grand Prix (`racer_env.py`) — Top-Down High-Speed Circuit Racer**:
    - Continuous vehicle kinematics: acceleration, steering, tire drift friction, and grass runoff.
    - Asphalt oval track with red & white apex kerbs, checkered finish line, and AI rival cars.
    - **Controls**: `W` / `Up` (Gas), `S` / `Down` (Brake), `A` / `D` (Steer), `Space` (Turbo Boost), `R` (Reset).
 
 ---
 
-## ⚡ Model Specifications
+## Model Specifications
 
 | Specification | Mundus-85M (Fast) | Mundus-230M (High-Capacity) | Mundus-3B (Cloud / Colab) |
 | :--- | :--- | :--- | :--- |
@@ -61,7 +61,7 @@ Mundus includes 4 self-contained retro game simulators written in native NumPy (
 
 ---
 
-## 🚀 Quickstart
+## Quickstart
 
 ### 1. Installation
 
@@ -103,7 +103,7 @@ python3 train.py \
 
 ---
 
-## 📦 Project Structure
+## Project Structure
 
 ```
 mundus-0.1-85-230M/
@@ -133,6 +133,6 @@ mundus-0.1-85-230M/
 
 ---
 
-## 📜 License
+## License
 
 MIT License. Free for research, personal, and commercial experimentation.
