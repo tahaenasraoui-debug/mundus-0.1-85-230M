@@ -91,20 +91,31 @@ class NeuralEngineState:
             else:
                 self.wm_config = get_config(model_type) if model_type != "auto" else get_config_85m()
 
-            self.world_model = WorldModel(self.wm_config)
+            infer_dtype = (
+                (torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16)
+                if self.device == "cuda"
+                else torch.float32
+            )
+
+            # Instantiate directly on target device & half-precision to avoid CPU RAM OOM on 12GB T4 VMs
+            prev_dtype = torch.get_default_dtype()
+            try:
+                torch.set_default_dtype(infer_dtype)
+                with torch.device(self.device):
+                    self.world_model = WorldModel(self.wm_config)
+            finally:
+                torch.set_default_dtype(prev_dtype)
+
             if "world_model" in ckpt:
                 self.world_model.load_state_dict(ckpt["world_model"])
             if "tokenizer" in ckpt and not tok_loaded:
                 self.tokenizer.load_state_dict(ckpt["tokenizer"])
             del ckpt
+            import gc
+            gc.collect()
 
-            if self.device == "cuda":
-                infer_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-                self.world_model = self.world_model.to(device=self.device, dtype=infer_dtype)
-                print(f"[NeuralEngine] Loaded checkpoint in {infer_dtype} on CUDA!")
-            else:
-                self.world_model = self.world_model.to(self.device)
-                print("[NeuralEngine] Loaded checkpoint successfully!")
+            self.world_model = self.world_model.to(device=self.device, dtype=infer_dtype)
+            print(f"[NeuralEngine] Loaded checkpoint in {infer_dtype} on {self.device.upper()}!")
         else:
             self.wm_config = get_config(model_type) if model_type != "auto" else get_config_85m()
             self.world_model = WorldModel(self.wm_config).to(self.device)
