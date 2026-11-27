@@ -81,7 +81,7 @@ class NeuralEngineState:
         ckpt_file = Path(checkpoint_path) if checkpoint_path is not None else None
         if ckpt_file is not None and ckpt_file.exists():
             print(f"[NeuralEngine] Loading weights from {ckpt_file}...")
-            ckpt = torch.load(ckpt_file, map_location=self.device, weights_only=False)
+            ckpt = torch.load(ckpt_file, map_location="cpu", weights_only=False)
             if "config" in ckpt:
                 self.wm_config = ckpt["config"]
                 print(
@@ -91,12 +91,20 @@ class NeuralEngineState:
             else:
                 self.wm_config = get_config(model_type) if model_type != "auto" else get_config_85m()
 
-            self.world_model = WorldModel(self.wm_config).to(self.device)
+            self.world_model = WorldModel(self.wm_config)
             if "world_model" in ckpt:
                 self.world_model.load_state_dict(ckpt["world_model"])
             if "tokenizer" in ckpt and not tok_loaded:
                 self.tokenizer.load_state_dict(ckpt["tokenizer"])
-            print("[NeuralEngine] Loaded checkpoint successfully!")
+            del ckpt
+
+            if self.device == "cuda":
+                infer_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+                self.world_model = self.world_model.to(device=self.device, dtype=infer_dtype)
+                print(f"[NeuralEngine] Loaded checkpoint in {infer_dtype} on CUDA!")
+            else:
+                self.world_model = self.world_model.to(self.device)
+                print("[NeuralEngine] Loaded checkpoint successfully!")
         else:
             self.wm_config = get_config(model_type) if model_type != "auto" else get_config_85m()
             self.world_model = WorldModel(self.wm_config).to(self.device)
